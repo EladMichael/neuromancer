@@ -45,7 +45,7 @@ A PyTorch-based neuromancer subpackage for differentiable building simulation an
 ## Quick Start
 
 ```python
-from torch_buildings import VAVBox, Envelope
+from neuromancer.hvac import VAVBox, Envelope
 
 # Create a 3-zone VAV system
 vav = VAVBox(

@@ -263,11 +263,9 @@ class System(nn.Module):
         for i in range(nsteps):
 
             for node in self.nodes:
-                print({k: data[k].shape for k in node.input_keys})
                 indata = {k: data[k][:, i] for k in node.input_keys}  # collect what the compute node needs from data nodes
                 outdata = node(indata)  # compute
                 data = self.cat(data, outdata)  # feed the data nodes
-            print({k: v.shape for k, v in data.items()})
 
         return data  # return recorded system measurements
 

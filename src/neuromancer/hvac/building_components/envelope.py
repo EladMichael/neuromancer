@@ -548,7 +548,7 @@ class Envelope(BuildingComponent):
                 peak_hour = 14.
                 seasonal_amplitude = 20.0
                 base_temp = T_outdoor_base
-                day_of_year = day_of_year_fn(t).item()
+                day_of_year = day_of_year_fn(t)
                 t_hr = t / 3600.0
                 if day_of_year is None:
                     day_of_year = int((t / 86400) % 365) + 1

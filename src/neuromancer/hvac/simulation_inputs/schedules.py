@@ -238,9 +238,6 @@ def seasonal_temperature(t: float, base_temp: float = 288.15, daily_amplitude: f
 
     See file docstring for physical interpretation and usage.
     """
-    if isinstance(t, torch.Tensor):
-        print('tttttttt\n', t.shape)
-        exit()
     t_hr = t / 3600.0
     if day_of_year is None:
         day_of_year = int((t / 86400) % 365) + 1
@@ -248,7 +245,6 @@ def seasonal_temperature(t: float, base_temp: float = 288.15, daily_amplitude: f
     seasonal_temp = seasonal_amplitude * np.sin(2 * np.pi * (day_of_year - 80) / 365)
     total_temp = base_temp + daily_temp + seasonal_temp
     total_temp = torch.full(shape, total_temp)
-    print("temp", total_temp.shape)
     return total_temp
 ######################################
 ### Adding stochasticity to schedules

@@ -236,7 +236,7 @@ class VAVBox(BuildingComponent):
             dtype (torch.dtype): Tensor data type for computation.
         """
         super().__init__(params=locals(), learnable=learnable, device=device, dtype=dtype)
-
+        print("initializing VAV box component")
         # Initialize sub-components with zone-specific parameters
         self.damper = Damper(
             max_airflow=self.airflow_max,         # [n_zones] tensor from base class
@@ -308,8 +308,8 @@ class VAVBox(BuildingComponent):
         """
         # --- MODE DETECTION ---
         # Detect cooling vs heating mode based on supply air temperature relative to setpoint
-        cooling_mode = T_supply_upstream < (T_setpoint - self.mode_deadband)  # [batch_size, n_zones]
-
+        # cooling_mode = T_supply_upstream < (T_setpoint - self.mode_deadband)  # [batch_size, n_zones]
+        cooling_mode = T_zone > (T_setpoint - self.mode_deadband)  # don't want reheat
         # --- MODE-DEPENDENT AIRFLOW CONTROL ---
         T_error = T_setpoint - T_zone  # [batch_size, n_zones] - positive when zone is cold
 
@@ -380,7 +380,7 @@ class VAVBox(BuildingComponent):
         )
 
         # Calculate supply air heat flow (thermal energy content)
-        Q_supply_flow = airflow_actual * self.cp_air * T_supply_final
+        Q_supply_flow = airflow_actual * self.cp_air * (T_supply_final - T_zone)
 
         # Calculate supply air pressure (airflow-dependent pressure drop model)
         # Pressure drop increases with airflow - typical VAV box pressure drop curve

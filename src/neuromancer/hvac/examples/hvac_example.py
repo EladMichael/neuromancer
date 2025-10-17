@@ -1,3 +1,5 @@
+# TODO: Fix plotting
+# TODO: Confirm single component simulations still work.
 """
 Building System Simulation Example
 
@@ -53,6 +55,7 @@ envelope = Envelope(
     R_env=[0.1, 0.12],    # Zone-specific thermal resistance [K/W]
     C_env=[1.2e6, 1.0e6], # Zone-specific thermal mass [J/K]
     R_internal=0.05,      # Inter-zone resistance [K/W]
+    adjacency=[[0.0, 1.0], [0.0, 1.0]],
 )
 
 # 3. RTU central air handler
@@ -190,10 +193,17 @@ key_variables = [
     'envelope.T_zones',      # Zone temperatures
     'rtu.T_supply',          # Supply air temperature
     'rtu.total_power',       # RTU power consumption
-    'vav.damper_position',   # VAV damper positions
-    'vav.reheat_position',   # VAV reheat positions
-    'vav.Q_supply_flow',
-    'solar.Q_solar',     # Solar heat gains
+    # 'vav.damper_position',   # VAV damper positions
+    # 'vav.reheat_position',   # VAV reheat positions
+    # 'vav.Q_supply_flow',
+    # 'solar.Q_solar',     # Solar heat gains
+    # "rtu.T_supply",
+    # "rtu.supply_heat_flow",
+    # "rtu.P_supply",
+    # "rtu.supply_airflow",
+    # "rtu.damper_position",
+    # "rtu.valve_position",
+    # "rtu.integral_accumulator",
 ]
 
 # Check which variables are available
