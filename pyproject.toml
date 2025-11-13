@@ -43,14 +43,14 @@ dependencies = [
     "six",
     "pydot==1.4.2",
     "pyts",
-    "torch",
+    "torch>=1.8",
     "torchdiffeq",
-    "toml", 
-    "lightning", 
-    "cvxpy", 
-    "cvxpylayers", 
+    "toml",
+    "lightning",
+    "cvxpy",
+    "cvxpylayers",
     "casadi",
-    "torchsde"
+    "torchsde",
 ]
 
 [project.urls]
