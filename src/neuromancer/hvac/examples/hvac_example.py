@@ -18,17 +18,19 @@ SolarGains → Envelope ← VAVBox ← RTU
 """
 
 import torch
+import os
+
+# default runtime behavior is to type check!
+# this may slow down performance for heavy 
+# workloads. Uncomment the following line to turn
+# off runtime typechecking. 
+# os.environ["RUNTIME_TYPING"] = False
 
 # Import building components
 from neuromancer.hvac.building_components import RTU, VAVBox, Envelope, SolarGains
 from neuromancer.hvac.building import BuildingNode, BuildingSystem
 from neuromancer.hvac.plot import simplot
 
-print("Building System Simulation Example")
-print("="*60)
-print("Components: RTU + VAVBox + Envelope + SolarGains")
-print("Configuration: 2 zones, automatic wiring")
-print("="*60)
 
 # System configuration
 n_zones = 2
@@ -45,17 +47,18 @@ solar = SolarGains(
     window_area=25.0,  # m² per zone
     window_orientation=[0.0, 90.0],  # South, West facing windows
     window_shgc=0.6,   # Solar heat gain coefficient
-    latitude_deg=40.0, # Building latitude
+    latitude_deg=40.0,  # Building latitude
     max_solar_irradiance=800.0  # W/m²
 )
+
 
 # 2. Building envelope for thermal dynamics
 envelope = Envelope(
     n_zones=n_zones,
     R_env=[0.1, 0.12],    # Zone-specific thermal resistance [K/W]
-    C_env=[1.2e6, 1.0e6], # Zone-specific thermal mass [J/K]
+    C_env=[1.2e6, 1.0e6],  # Zone-specific thermal mass [J/K]
     R_internal=0.05,      # Inter-zone resistance [K/W]
-    adjacency=[[0.0, 1.0], [0.0, 1.0]],
+    adjacency=[[1.0, 0.0], [0.0, 1.0]],  # Identity matrix, seperate zones
 )
 
 # 3. RTU central air handler
@@ -63,8 +66,8 @@ rtu = RTU(
     n_zones=n_zones,
     airflow_max=4.0,      # Total system capacity [kg/s]
     airflow_oa_min=0.4,      # Minimum outdoor air [kg/s]
-    Q_coil_max=20000,     # Heating/cooling capacity [W]
-    fan_power_per_flow=800,  # Fan efficiency [W/(kg/s)]
+    Q_coil_max=20000.,     # Heating/cooling capacity [W]
+    fan_power_per_flow=800.,  # Fan efficiency [W/(kg/s)]
     cooling_COP=3.2,      # Cooling efficiency
     heating_efficiency=0.88  # Heating efficiency
 )
@@ -75,7 +78,7 @@ vav = VAVBox(
     airflow_min=[0.1, 0.08],     # Zone minimums [kg/s]
     airflow_max=[0.8, 0.6],      # Zone maximums [kg/s]
     control_gain=[2.5, 2.0],     # Zone control sensitivity
-    Q_reheat_max=[3000, 2500], # Zone reheat capacity [W]
+    Q_reheat_max=[3000, 2500],  # Zone reheat capacity [W]
     reheat_efficiency=0.95       # Electric reheat efficiency
 )
 
@@ -118,25 +121,41 @@ vav_inputs = {
 solar_inputs = {
     "T_outdoor": "T_outdoor",
     "weather_factor": "weather_factor",
-    "day_of_year": "day_of_year"
 }
 
 solar_node = BuildingNode(solar, input_map=solar_inputs, name="solar")
-envelope_node = BuildingNode(envelope, input_map=envelope_inputs, name="envelope")
+envelope_node = BuildingNode(
+    envelope, input_map=envelope_inputs, name="envelope")
 rtu_node = BuildingNode(rtu, input_map=rtu_inputs, name="rtu")
 vav_node = BuildingNode(vav, input_map=vav_inputs, name="vav")
 
+t_start = 5*60*60  # 6 AM in seconds
+t_duration = 86400  # 24 hrs in seconds
+dt = 300  # 5 minutes
+t_rng = range(t_start, t_start+t_duration, dt)
+
 data = {}
 # Weather and occupancy disturbance variables
-data["Q_internal"] = torch.stack([envelope.input_functions["Q_internal"](t, batch_size=1) for t in range(288)], dim=1)
-data["T_outdoor"] = torch.stack([solar.input_functions["T_outdoor"](t, batch_size=1) for t in range(288)], dim=1)
-data["weather_factor"] = torch.stack([solar.input_functions["weather_factor"](t, batch_size=1) for t in range(288)], dim=1)
-data["day_of_year"] = torch.stack([solar.input_functions["day_of_year"](t, batch_size=1) for t in range(288)], dim=1)
+# shape is (batch, steps, features)
+data["t"] = torch.tensor(t_rng).reshape(1, -1, 1) 
+# data["t_start"] = t_start
+# data["dt"] = dt
+# data["t_duration"] = t_duration
+data["Q_internal"] = torch.stack([envelope.input_functions["Q_internal"](
+    t, batch_size=1) for t in t_rng], dim=1)
+data["T_outdoor"] = torch.stack([solar.input_functions["T_outdoor"](
+    t, batch_size=1) for t in t_rng], dim=1)
+data["weather_factor"] = torch.stack([solar.input_functions["weather_factor"](
+    t, batch_size=1) for t in t_rng], dim=1)
+
 
 # Control variables
-data["rtu_T_supply_setpoint"] = torch.stack([rtu.input_functions["T_supply_setpoint"](t, batch_size=1) for t in range(288)], dim=1)
-data["rtu_supply_airflow_setpoint"] = torch.stack([rtu.input_functions["supply_airflow_setpoint"](t, batch_size=1) for t in range(288)], dim=1)
-data["vav_T_setpoint"] = torch.stack([vav.input_functions["T_setpoint"](t, batch_size=1) for t in range(288)], dim=1)
+data["rtu_T_supply_setpoint"] = torch.stack(
+    [rtu.input_functions["T_supply_setpoint"](t, batch_size=1) for t in t_rng], dim=1)
+data["rtu_supply_airflow_setpoint"] = torch.stack(
+    [rtu.input_functions["supply_airflow_setpoint"](t, batch_size=1) for t in t_rng], dim=1)
+data["vav_T_setpoint"] = torch.stack(
+    [vav.input_functions["T_setpoint"](t, batch_size=1) for t in t_rng], dim=1)
 
 
 # 1. SolarGains - generates solar_gains (external input)
@@ -150,12 +169,16 @@ system = BuildingSystem([
     envelope_node  # Thermal dynamics last (integrates all loads)
 ], name="TwoZoneBuilding")
 
+
+os.makedirs('plots', exist_ok=True)
+
+
 fig, _ = simplot(
     system,
     results=data,
     variables=[k for k in data],
     time_range=None,  # Full day
-    figsize=(14, 10),
+    figsize=(14., 10.),
     title="Initial data",
     filename='plots/initial_data.png'
 )
@@ -171,11 +194,7 @@ print("="*60)
 
 print("\nRunning 24-hour simulation...")
 results = system.simulate(
-    duration_hours=24.0,    # Full day
-    dt_minutes=5.0,         # 5-minute time steps
-    t_start=6.0,       # Start at 6 AM
-    batch_size=1,
-    external_inputs=data,# Single scenario
+    data=data,  # Single scenario
 )
 print(f"Simulation complete!")
 print(f"Results contain {len(results)} variables")

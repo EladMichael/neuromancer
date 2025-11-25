@@ -15,6 +15,12 @@ ZONE VECTORIZATION SUPPORT:
 import torch
 from .actuator import Actuator
 from typing import Literal, Union, List
+import os
+if os.environ.get("RUNTIME_TYPING", 1):
+    from beartype import beartype
+else:
+    # passthrough for no type checking
+    def beartype(fn): return fn
 
 
 class ElectricReheatCoil(Actuator):
@@ -99,8 +105,9 @@ class ElectricReheatCoil(Actuator):
             # "equal_percent": P ∝ position³ (fine control at low loads)
             # "quick_opening": P ∝ √position (rapid heating response)
 
-            electrical_efficiency: Union[float, List[float], torch.Tensor] = 0.98,
-            # [0-1] Electrical to thermal conversion efficiency
+            # electrical_efficiency: Union[float, List[float], torch.Tensor] = 1.0,
+            # Electrical resistance heat is perfectly efficient
+            # Resisitive losses are still heat! Not worth storing!
             # Can be:
             #   - Scalar: Same efficiency for all zones
             #   - List[n_zones]: Zone-specific efficiencies
@@ -134,8 +141,8 @@ class ElectricReheatCoil(Actuator):
             max_thermal_output: Maximum thermal output at full electrical power [W]
                                Scalar (shared) or vector (zone-specific)
             heating_characteristic: Control curve type for power modulation
-            electrical_efficiency: Electrical to thermal conversion efficiency [0-1]
-                                   Scalar (shared) or vector (zone-specific)
+            [deprecated] electrical_efficiency: Electrical to thermal conversion 
+                 efficiency [0-1] Scalar (shared) or vector (zone-specific)
             tau: Actuator response time constant [s]
                  Scalar (shared) or vector (zone-specific)
             actuator_model: Dynamics model for actuator positioning
@@ -144,7 +151,7 @@ class ElectricReheatCoil(Actuator):
 
         self.max_thermal_output = max_thermal_output
         self.heating_characteristic = heating_characteristic
-        self.electrical_efficiency = electrical_efficiency
+        # self.electrical_efficiency = electrical_efficiency
 
     def target_heating_to_position(self, target_heating: torch.Tensor) -> torch.Tensor:
         """
@@ -225,9 +232,7 @@ class ElectricReheatCoil(Actuator):
     def position_to_electrical_power(self, position: torch.Tensor) -> torch.Tensor:
         """
         Convert actuator position to electrical power consumption.
-
-        Calculates electrical power drawn from the grid based on thermal output
-        and electrical efficiency of the heating system.
+        Just a wrapper for the thermal power, because it's a resistance coil.
 
         Args:
             position: Current actuator position [0-1], shape [batch_size, n_zones]
@@ -235,10 +240,8 @@ class ElectricReheatCoil(Actuator):
         Returns:
             torch.Tensor: Electrical power consumption [W], shape [batch_size, n_zones]
         """
-        thermal_output = self.position_to_thermal_output(position)
-        # Broadcasting: [batch_size, n_zones] / [n_zones] -> [batch_size, n_zones]
-        electrical_power = thermal_output / self.electrical_efficiency
-        return electrical_power
+        # electrical_power = thermal_output / self.electrical_efficiency
+        return self.position_to_thermal_output(position)
 
     def forward(self, t: float, target_heating: torch.Tensor = None,
                 current_position: torch.Tensor = None, dt: float = 1.0) -> dict:
@@ -280,11 +283,11 @@ class ElectricReheatCoil(Actuator):
 
         # Step 3: Calculate actual thermal output and electrical power consumption
         actual_thermal_output = self.position_to_thermal_output(new_position)
-        actual_electrical_power = self.position_to_electrical_power(new_position)
+        # actual_electrical_power = self.position_to_electrical_power(new_position)
 
         return {
             "position": new_position,
             "thermal_output": actual_thermal_output,
-            "electrical_power": actual_electrical_power,
+            "electrical_power": actual_thermal_output,
             "position_setpoint": position_setpoint
         }

@@ -58,28 +58,41 @@ Units:
 """
 
 import torch
+import neuromancer.hvac.simclock as simclock
 from .base import BuildingComponent
 from ..actuators.actuator import Actuator
 from ..simulation_inputs.schedules import seasonal_temperature
+import os
+if os.environ.get("RUNTIME_TYPING", 1):
+    from beartype import beartype
+else:
+    # passthrough for no type checking
+    def beartype(fn): return fn
 
 # =============================================================================
 # POWER CALCULATION FUNCTIONS
 # =============================================================================
 
+
+@beartype
 def calculate_fan_power(airflow: torch.Tensor, fan_power_per_flow: torch.Tensor) -> torch.Tensor:
     """Calculate electrical power consumption for air moving equipment."""
     return airflow * fan_power_per_flow
 
 
+@beartype
 def calculate_cooling_power(Q_cooling_load: torch.Tensor, cooling_COP: torch.Tensor) -> torch.Tensor:
     """Calculate electrical power input for mechanical cooling equipment."""
     return Q_cooling_load / cooling_COP
 
 
+@beartype
 def calculate_heating_power(Q_heating_load: torch.Tensor, heating_efficiency: torch.Tensor) -> torch.Tensor:
     """Calculate fuel or electrical power input for heating equipment."""
     return Q_heating_load / heating_efficiency
 
+
+@beartype
 def calculate_hvac_power(actual_airflow: torch.Tensor, Q_cooling_load: torch.Tensor,
                          Q_heating_load: torch.Tensor, fan_power_per_flow: torch.Tensor,
                          cooling_COP: torch.Tensor, heating_efficiency: torch.Tensor) -> dict:
@@ -101,6 +114,7 @@ def calculate_hvac_power(actual_airflow: torch.Tensor, Q_cooling_load: torch.Ten
 # =============================================================================
 
 
+@beartype
 def calculate_air_mixing(airflow: torch.Tensor, airflow_oa_min: torch.Tensor,
                          T_oa: torch.Tensor, T_ra: torch.Tensor) -> tuple:
     """Calculate air mixing for HVAC components that combine outdoor and return air."""
@@ -119,12 +133,14 @@ def calculate_air_mixing(airflow: torch.Tensor, airflow_oa_min: torch.Tensor,
     return oa_fraction, T_mixed_air
 
 
+@beartype
 def calculate_thermal_load(airflow: torch.Tensor, cp_air: torch.Tensor,
                            setpoint_temp: torch.Tensor, current_temp: torch.Tensor) -> torch.Tensor:
     """Calculate thermal load required to change air temperature to setpoint."""
     return airflow * cp_air * (setpoint_temp - current_temp)
 
 
+@beartype
 def apply_mode_limits(thermal_load: torch.Tensor, mode: str) -> torch.Tensor:
     """Apply HVAC operating mode restrictions to thermal load."""
     if mode == "cool":
@@ -135,6 +151,7 @@ def apply_mode_limits(thermal_load: torch.Tensor, mode: str) -> torch.Tensor:
         return thermal_load  # No restrictions
 
 
+@beartype
 def calculate_economizer_fraction(T_oa, T_ra, min_oa_fraction, T_economizer_max=297.15, ctrl_economizer_deadband=2.0):
     """
     Calculate outdoor air fraction for economizer operation.
@@ -274,6 +291,7 @@ class RTU(BuildingComponent):
         "P_supply": (100e3, 105e3),  # Supply duct pressure [Pa]
     }
 
+    @beartype
     def __init__(
             self,
             # RTU parameters
@@ -328,6 +346,7 @@ class RTU(BuildingComponent):
             name="coil_valve"
         )
 
+    @beartype
     def forward(
             self, *,
             t: float = 0.,  # [s] Current simulation time
@@ -465,7 +484,6 @@ class RTU(BuildingComponent):
             )
         )
 
-
         # =====================================================================
         # STEP 6: UPDATE COIL VALVE POSITION
         # =====================================================================
@@ -567,14 +585,16 @@ class RTU(BuildingComponent):
                 "valve_position": lambda bs: self._sample_valve_position(bs, mode),
             }
 
-    def _sample_integral_accumulator(self, batch_size, mode):
+    @beartype
+    def _sample_integral_accumulator(self, batch_size: int, mode: str):
         """Initialize integral accumulator based on context and mode."""
         if mode == "steady_state":
             return torch.zeros((batch_size, 1), device=self.device, dtype=self.dtype)
         else:  # realistic
             return torch.normal(0.0, 0.1, (batch_size, 1), device=self.device, dtype=self.dtype).clamp(-0.2, 0.2)
-
-    def _sample_T_supply(self, batch_size, mode):
+    
+    @beartype
+    def _sample_T_supply(self, batch_size: int, mode: str):
         """Initialize supply air temperature based on context."""
         # Get context-based supply temperature, fallback to setpoint-based approach
         T_supply_context = self.context["T_supply_base"]
@@ -587,7 +607,8 @@ class RTU(BuildingComponent):
             variation = torch.normal(0.0, 1.0, (batch_size, 1), device=self.device, dtype=self.dtype).clamp(-2.0, 2.0)
             return base_temp + variation
 
-    def _sample_damper_position(self, batch_size, mode):
+    @beartype
+    def _sample_damper_position(self, batch_size: int, mode: str):
         """Initialize damper position based on context airflow fraction."""
         airflow_fraction = self.context["supply_airflow_fraction"]
         base_position = torch.full((batch_size, 1), airflow_fraction, device=self.device, dtype=self.dtype)
@@ -598,9 +619,11 @@ class RTU(BuildingComponent):
             variation = torch.normal(0.0, 0.05, (batch_size, 1), device=self.device, dtype=self.dtype)
             return (base_position + variation).clamp(0.0, 1.0)
 
-    def _sample_valve_position(self, batch_size, mode):
+    @beartype
+    def _sample_valve_position(self, batch_size: int, mode: str):
         """Initialize valve position based on context system mode."""
-        system_mode = self.context.get("system_mode", "cooling")
+        
+        system_mode = self.context["system_mode"]
 
         if system_mode == "cooling":
             # Moderate cooling valve position
@@ -636,37 +659,34 @@ class RTU(BuildingComponent):
         """
         if not hasattr(self, '_input_functions'):
             # Get context values with fallbacks
-            T_outdoor_base = self.context.get("T_outdoor", 288.15)  # Default: 15°C
-            day_of_year = self.context.get("day_of_year", 100)
-            T_setpoint_base = self.context.get("T_setpoint_base", 293.15)  # Default: 20°C
-            T_supply_base = self.context.get("T_supply_base", 286.15)  # Default: 13°C
-            supply_airflow_fraction = self.context.get("supply_airflow_fraction", 0.5)
-            occupancy_state = self.context.get("occupancy_state", "occupied")
 
-            def day_of_year_fn(t):
-                """Context-aware day of year with progression."""
-                # Start from context day and progress with simulation time
-                sim_days = t / 86400.0
-                current_day = (day_of_year + sim_days) % 365
-                if current_day == 0:
-                    current_day = 365
-                return current_day
+            req_keys = ['T_outdoor', 'occupancy_state', 'T_setpoint_base',
+                        'T_supply_base', 'supply_airflow_fraction']
+            assert all(key in self.context for key in req_keys), "Context does not contain required keys!"
+
+            T_outdoor_base = self.context.get("T_outdoor")
+            occupancy_state = self.context.get("occupancy_state")
+            T_setpoint_base = self.context.get("T_setpoint_base")
+            T_supply_base = self.context.get("T_supply_base")
+            supply_airflow_fraction = self.context.get("supply_airflow_fraction")
 
             def T_zones_fn(t, batch_size=1):
                 """Context-aware return temperatures based on supply air and building load."""
                 # Get current supply temperature from RTU or use context default
+
                 if hasattr(self, 'T_supply') and self.T_supply is not None:
                     T_supply = self.T_supply.expand(batch_size, self.n_zones)
                 else:
+                    print("Using default T_supply for zone temp in RTU")
                     T_supply = torch.full((batch_size, self.n_zones), T_supply_base,
                                           device=self.device, dtype=self.dtype)
 
                 # Zone temperature rise depends on occupancy and time of day
-                hour_of_day = (t / 3600.0) % 24
+                h_of_day = simclock.hour_of_day(t)
 
                 if occupancy_state == "occupied":
                     # Higher internal gains during occupied hours
-                    if 7 <= hour_of_day <= 19:  # Business hours
+                    if 7 <= h_of_day <= 19:  # Business hours
                         zone_temp_rise = 6.0  # Higher rise due to people, equipment, lights
                     else:
                         zone_temp_rise = 3.0  # Lower rise after hours
@@ -676,7 +696,7 @@ class RTU(BuildingComponent):
                     zone_temp_rise = 4.0  # Moderate gains during startup
 
                 # Add small solar and time-of-day effects
-                solar_effect = 1.0 * torch.sin(torch.tensor(2 * torch.pi * (hour_of_day - 12) / 24))
+                solar_effect = 1.0 * torch.sin(torch.tensor(2 * torch.pi * (h_of_day - 12) / 24))
 
                 T_return = T_supply + zone_temp_rise + solar_effect
                 return T_return.to(device=self.device, dtype=self.dtype)
@@ -690,6 +710,7 @@ class RTU(BuildingComponent):
                 if hasattr(self, 'supply_airflow') and self.supply_airflow is not None:
                     total_supply = self.supply_airflow
                 else:
+                    print("Using default supply_flow for zone temp in RTU")
                     total_supply = torch.full((batch_size, 1), supply_flow_expected,
                                               device=self.device, dtype=self.dtype)
 
@@ -700,7 +721,7 @@ class RTU(BuildingComponent):
 
             def T_supply_setpoint_fn(t, batch_size=1):
                 """Context-aware supply air setpoint based on system mode and schedule."""
-                day_of_year = day_of_year_fn(t)
+                d_of_year = simclock.day_of_year(t)
                 if occupancy_state == "occupied":
                     # Normal occupied setpoint
                     setpoint = T_setpoint_base - 7.0  # Typically 7K below zone setpoint
@@ -712,7 +733,7 @@ class RTU(BuildingComponent):
                     setpoint = T_setpoint_base - 5.0
 
                 # Seasonal adjustment: slightly warmer supply in winter, cooler in summer
-                seasonal_adjustment = 1.0 * torch.sin(torch.tensor(2 * torch.pi * (day_of_year - 80) / 365))
+                seasonal_adjustment = 1.0 * torch.sin(torch.tensor(2 * torch.pi * (d_of_year - 80) / 365))
                 setpoint = setpoint + seasonal_adjustment
 
                 return torch.full((batch_size, 1), setpoint, device=self.device, dtype=self.dtype)
@@ -721,11 +742,11 @@ class RTU(BuildingComponent):
                 """Context-aware airflow setpoint based on occupancy and context."""
                 expected_airflow = supply_airflow_fraction * self.airflow_max
 
-                current_hour = (t / 3600.0) % 24
+                h_of_day = simclock.hour_of_day(t)
 
                 # Modulate based on occupancy schedule and time
                 if occupancy_state == "occupied":
-                    if 7 <= current_hour <= 19:  # Business hours
+                    if 7 <= h_of_day <= 19:  # Business hours
                         airflow_multiplier = 1.0
                     else:
                         airflow_multiplier = 0.7  # Reduced after hours
@@ -735,12 +756,11 @@ class RTU(BuildingComponent):
                     airflow_multiplier = 0.6  # Building startup
 
                 airflow_setpoint = expected_airflow * airflow_multiplier
-                setpoint = torch.full((batch_size, 1), airflow_setpoint, device=self.device, dtype=self.dtype)
+
                 return torch.full((batch_size, 1), airflow_setpoint, device=self.device, dtype=self.dtype)
 
             self._input_functions = {
                 "T_outdoor": lambda t, batch_size=1: seasonal_temperature(t, base_temp=T_outdoor_base,
-                                                                          day_of_year=day_of_year_fn(t),
                                                                           shape=(batch_size,1)),
                 "T_return_zones": T_zones_fn,
                 "return_airflow_zones": zone_return_airflows_fn,

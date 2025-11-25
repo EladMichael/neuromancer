@@ -14,6 +14,12 @@ ZONE VECTORIZATION SUPPORT:
 
 import torch
 from typing import Literal, Union, List
+import os
+if os.environ.get("RUNTIME_TYPING", 1):
+    from beartype import beartype
+else:
+    # passthrough for no type checking
+    def beartype(fn): return fn
 
 
 class Actuator(torch.nn.Module):
@@ -99,7 +105,7 @@ class Actuator(torch.nn.Module):
             t: float = 0.,  # [s] Current time
             setpoint: torch.Tensor = None,  # [0-1] Desired actuator position, shape [batch_size, n_zones]
             position: torch.Tensor = None,  # [0-1] Current position, shape [batch_size, n_zones]
-            dt: float = 1.,  # [s] Time step (for analytic/smooth models)
+            dt: float = None,  # [s] Time step (for analytic/smooth models)
     ) -> torch.Tensor:
         """
         Compute actuator response with zone vectorization support.
@@ -114,14 +120,16 @@ class Actuator(torch.nn.Module):
         Returns:
             Tensor: New actuator position [0-1], shape [batch_size, n_zones]
         """
+        assert setpoint, "Cannot call actuator without setpoint"
+
         if self.model == "instantaneous":
             return self._forward_instantaneous(setpoint)
 
         elif self.model == "analytic":
-            return self._forward_analytic(position, setpoint, dt)
+            return self._forward_analytic(setpoint, position, dt)
 
         elif self.model == "smooth_approximation":
-            return self._forward_smooth_approximation(position, setpoint, dt)
+            return self._forward_smooth_approximation(setpoint, position, dt)
 
         else:
             raise ValueError(f"Unknown model type: {self.model}")
@@ -138,7 +146,7 @@ class Actuator(torch.nn.Module):
         """
         return setpoint
 
-    def _forward_analytic(self, position: torch.Tensor, setpoint: torch.Tensor, dt: float) -> torch.Tensor:
+    def _forward_analytic(self, setpoint: torch.Tensor, position: torch.Tensor, dt: float) -> torch.Tensor:
         """
         Analytic solution to first-order lag (exact solution).
 
@@ -152,8 +160,7 @@ class Actuator(torch.nn.Module):
         Returns:
             Tensor: New position [0-1], shape [batch_size, n_zones]
         """
-        if position is None:
-            raise ValueError("position required for analytic model")
+        assert all(arg for arg in [position,dt]), "Analytic model requires position and dt"
 
         # Analytic solution: x(t+dt) = setpoint + (x_current - setpoint) * exp(-dt/tau)
         # Broadcasting: scalar / [n_zones] -> [n_zones]
@@ -163,7 +170,7 @@ class Actuator(torch.nn.Module):
 
         return position_new
 
-    def _forward_smooth_approximation(self, position: torch.Tensor, setpoint: torch.Tensor, dt: float) -> torch.Tensor:
+    def _forward_smooth_approximation(self, setpoint: torch.Tensor, position: torch.Tensor, dt: float) -> torch.Tensor:
         """
         Smooth approximation for stable gradients with adaptive approximation selection.
 
@@ -198,8 +205,8 @@ class Actuator(torch.nn.Module):
         Returns:
             Tensor: New position [0-1], shape [batch_size, n_zones]
         """
-        if position is None:
-            raise ValueError("position required for smooth_approximation model")
+
+        assert all(arg for arg in [position, dt]), "smooth_approximation requires position and dt"
 
         # Broadcasting: scalar / [n_zones] -> [n_zones]
         rate = dt / self.tau

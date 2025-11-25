@@ -39,6 +39,12 @@ import copy
 
 from ..simulation_inputs.schedules import stochastic_variation, persistent_excitation
 from ..context import MILD_COOLING_CONTEXT
+import os
+if os.environ.get("RUNTIME_TYPING", 1):
+    from beartype import beartype
+else:
+    # passthrough for no type checking
+    def beartype(fn): return fn
 
 
 class BuildingComponent(nn.Module, ABC):
@@ -86,7 +92,6 @@ class BuildingComponent(nn.Module, ABC):
         self._user_variable_ranges = {}
         self.n_zones = params.pop("n_zones", 1)
 
-
         # Parameter setup
         for name, value in params.items():
             if isinstance(value, (int, float, torch.Tensor, list, tuple)):
@@ -103,7 +108,6 @@ class BuildingComponent(nn.Module, ABC):
                     self.register_buffer(name, tensor)
             else:
                 setattr(self, name, value)
-
 
     @property
     def variable_ranges(self):
@@ -154,10 +158,10 @@ class BuildingComponent(nn.Module, ABC):
     def simulate(
             self,
             # Time and simulation control
-            duration_hours=24.0,  # Simulation duration in hours
-            dt_minutes=5.0,  # Time step in minutes
-            t_start_hour=5.0,  # Start time in hours (5 = 5 AM)
-            batch_size=1,  # Number of parallel simulations
+            t_duration: float = 86400.0,  # Simulation duration in seconds
+            t_dt: float = 300.0,  # Time step in seconds (5 minute default)
+            t_start: float = 18000.0,  # Start time in seconds (default 5 AM)
+            batch_size: int = 1,  # Number of parallel simulations
 
             # State and input control
             initial_state=None,  # Override initial states
@@ -165,14 +169,14 @@ class BuildingComponent(nn.Module, ABC):
 
             # Stochastic options
             pe=False,  # Persistent excitation
-            input_noise_amplitude=0.0,  # Input noise level
+            input_noise_amplitude: float = 0.0,  # Input noise level
     ):
         """
         Unified simulation with intuitive time parameters.
 
         Args:
-            duration_hours (float): Total simulation duration in hours (default: 24.0).
-            dt_minutes (float): Time step in minutes (default: 5.0).
+            t_duration (float): Total simulation duration in seconds (default: 60*60*24.0).
+            dt (float): Time step in seconds (default: 300.0).
             t_start_hour (float): Start time in hours (default: 5.0 for 5 AM).
             batch_size (int): Number of parallel simulations (default: 1).
 
@@ -187,21 +191,21 @@ class BuildingComponent(nn.Module, ABC):
 
         Examples:
             # Quick 1-hour simulation with 1-minute resolution
-            results = component.simulate(duration_hours=1.0, dt_minutes=1.0)
+            results = component.simulate(t_duration=3600.0, dt=60.0)
 
             # Full day simulation with default 5-minute resolution
-            results = component.simulate(duration_hours=24.0)
+            results = component.simulate()
 
             # High-resolution step response (10-second steps for 30 minutes)
-            results = component.simulate(duration_hours=0.5, dt_minutes=0.167)
+            results = component.simulate(t_duration=1800, dt=10)
 
-            # Multiple scenarios in parallel
-            results = component.simulate(duration_hours=12.0, batch_size=10)
+            # Multiple 12 hr scenarios in parallel
+            results = component.simulate(t_duration=43200, batch_size=10)
         """
-        # Convert intuitive parameters to internal format
-        self.dt = dt_minutes * 60.0  # Convert minutes to seconds
+
+        self.dt = t_dt  # Convert minutes to seconds
         self.batch_size = batch_size
-        n_steps = int((duration_hours * 3600.0) / self.dt)
+        n_steps = int(t_duration / self.dt)
 
         # self.build_input_functions(
         #     input_functions=input_functions,
@@ -210,25 +214,25 @@ class BuildingComponent(nn.Module, ABC):
         # )
 
         log = defaultdict(list)
-        current_time = t_start_hour * 3600.0
 
         # Generate initial states and inputs
         states = {k: f(batch_size) for k, f in self.initial_state_functions().items()}
-        inputs = {k: fn(current_time, batch_size) for k, fn in self.input_functions.items()}
+        inputs = {k: fn(t_start, batch_size) for k, fn in self.input_functions.items()}
 
         # Log initial states, disturbances, controls
         for k, v in {**inputs, **states}.items():
             log[k].append(v)
 
+        t_current = t_start
         for step in range(n_steps):
             # Forward pass
             inputs = {**inputs, **states}
-            outputs = self.forward(t=current_time, dt=self.dt, **inputs)
+            outputs = self.forward(t=t_current, dt=self.dt, **inputs)
 
             # Update for next step
-            current_time += self.dt
+            t_current += self.dt
             states = {k: v for k, v in outputs.items() if k in self._state_ranges}
-            inputs = {k: fn(current_time, batch_size) for k, fn in self.input_functions.items()}
+            inputs = {k: fn(t_current, batch_size) for k, fn in self.input_functions.items()}
 
             # Log
             for k, v in {**inputs, **outputs}.items():
@@ -244,7 +248,7 @@ class BuildingComponent(nn.Module, ABC):
     def build_input_functions(
         self,
         input_functions=None,
-        pe=False, # persistent excitation
+        pe=False,  # persistent excitation
         input_noise_amplitude=0.0,
     ):
         """

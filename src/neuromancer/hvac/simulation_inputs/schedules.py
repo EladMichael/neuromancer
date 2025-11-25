@@ -114,13 +114,14 @@ This module can be extended with:
 
 import torch
 import numpy as np
+import neuromancer.hvac.simclock as simclock
 
 ################################
 ## Cyclical time-based schedules
 ################################
 
 def sinusoidal_temperature(t: float, base_temp: float = 293.15, amplitude: float = 10.0,
-                          peak_hour: float = 14.0, shape=(1,1)) -> torch.Tensor:
+                           peak_hour: float = 14.0, shape=(1, 1)) -> torch.Tensor:
     """
     Generate sinusoidal temperature profile for natural daily variation.
 
@@ -136,13 +137,15 @@ def sinusoidal_temperature(t: float, base_temp: float = 293.15, amplitude: float
 
     See file docstring for physical interpretation and usage.
     """
+
+    # Not using hour of day here so the amplitude shift is smooth between hours
     t_hr = t / 3600.0
     temp_k = base_temp + amplitude * np.sin(2 * np.pi * (t_hr - peak_hour) / 24)
     return torch.tensor([temp_k]).repeat(shape)
 
 
 def binary_schedule(t: float, primary_value: float = 1., secondary_value: float = 0.,
-                   start_hour: float = 7.0, end_hour: float = 19.0, shape=(1,1)) -> torch.Tensor:
+                    start_hour: float = 7.0, end_hour: float = 19.0, shape=(1, 1)) -> torch.Tensor:
     """
     Generate binary schedule, e.g., simple occupied/unoccupied operation patterns.
 
@@ -159,8 +162,8 @@ def binary_schedule(t: float, primary_value: float = 1., secondary_value: float 
 
     See file docstring for physical interpretation and usage.
     """
-    t_hr = t / 3600.0
-    value = primary_value if start_hour <= t_hr < end_hour else secondary_value
+    h_of_day = simclock.hour_of_day(t)
+    value = primary_value if start_hour <= h_of_day < end_hour else secondary_value
     return torch.tensor([value]).repeat(shape)
 
 
@@ -220,17 +223,16 @@ def ramp_schedule(t: float, start_hour: float = 6.0,
 
 
 def seasonal_temperature(t: float, base_temp: float = 288.15, daily_amplitude: float = 10.0, peak_hour=14.,
-                        seasonal_amplitude: float = 20.0, day_of_year: int = None, shape=(1,1)) -> torch.Tensor:
+                        seasonal_amplitude: float = 20.0, shape=(1,1)) -> torch.Tensor:
     """
     Generate temperature profile with both daily and seasonal variation.
 
     Args:
-        t (float): Time [s] from midnight.
+        t (float): sec from epoch.
         base_temp (float, optional): Annual average temperature [K]. Default 288.15 K.
         daily_amplitude (float, optional): Daily temperature swing [K]. Default 10.0 K.
         peak_hour (float, optional): Hour of peak temperature [0-24], default 14.0 (2 PM).
         seasonal_amplitude (float, optional): Seasonal temperature swing [K]. Default 20.0 K.
-        day_of_year (int, optional): Day of year [1-365]. If None, calculated from t. Default None.
         nzones (int, optional): Output batch size. Default 1.
 
     Returns:
@@ -238,11 +240,11 @@ def seasonal_temperature(t: float, base_temp: float = 288.15, daily_amplitude: f
 
     See file docstring for physical interpretation and usage.
     """
-    t_hr = t / 3600.0
-    if day_of_year is None:
-        day_of_year = int((t / 86400) % 365) + 1
-    daily_temp = daily_amplitude * np.sin(2 * np.pi * (t_hr - peak_hour) / 24)
-    seasonal_temp = seasonal_amplitude * np.sin(2 * np.pi * (day_of_year - 80) / 365)
+    h_of_day = simclock.hour_of_day(t)
+    d_of_year = simclock.day_of_year(t)
+
+    daily_temp = daily_amplitude * np.sin(2 * np.pi * (h_of_day - peak_hour) / 24)
+    seasonal_temp = seasonal_amplitude * np.sin(2 * np.pi * (d_of_year - 80) / 365)
     total_temp = base_temp + daily_temp + seasonal_temp
     total_temp = torch.full(shape, total_temp)
     return total_temp

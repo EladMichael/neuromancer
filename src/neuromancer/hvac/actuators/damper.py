@@ -15,6 +15,12 @@ ZONE VECTORIZATION SUPPORT:
 import torch
 from .actuator import Actuator
 from typing import Literal, Union, List
+import os
+if os.environ.get("RUNTIME_TYPING", 1):
+    from beartype import beartype
+else:
+    # passthrough for no type checking
+    def beartype(fn): return fn
 
 
 class Damper(Actuator):
@@ -157,6 +163,9 @@ class Damper(Actuator):
         Returns:
             torch.Tensor: Required damper position [0-1], shape [batch_size, n_zones]
         """
+
+        print("This function currently takes pressure and doesn't use it!")
+
         # Normalize airflow to fraction of maximum capacity
         # Broadcasting: [batch_size, n_zones] / [n_zones] -> [batch_size, n_zones]
         flow_fraction = target_airflow / self.max_airflow
@@ -183,7 +192,7 @@ class Damper(Actuator):
         return torch.clamp(position, 0.0, 1.0)
 
     def position_to_airflow(self, position: torch.Tensor,
-                            duct_pressure: torch.Tensor = None) -> torch.Tensor:
+                            duct_pressure: torch.Tensor) -> torch.Tensor:
         """
         Convert damper position to actual airflow (forward flow calculation).
 
@@ -223,15 +232,18 @@ class Damper(Actuator):
         base_airflow = flow_fraction * self.max_airflow
 
         # Apply pressure correction if duct pressure varies from nominal
-        if duct_pressure is not None:
-            # Theoretical relationship: Q ∝ √ΔP (orifice flow equation)
-            # Broadcasting: [batch_size, n_zones or 1] / [n_zones or scalar] -> [batch_size, n_zones]
-            pressure_factor = torch.sqrt(duct_pressure / self.nominal_pressure)
-            # Clamp to reasonable range to prevent unrealistic flows
-            pressure_factor = torch.clamp(pressure_factor, 0.5, 2.0)
-            airflow = base_airflow * pressure_factor
-        else:
-            airflow = base_airflow
+        assert duct_pressure, "Why are we calculating this if we don't know duct pressure? Just pass it, if it's nominal! Let me know!"
+        # if duct_pressure is not None:
+        
+        # Theoretical relationship: Q ∝ √ΔP (orifice flow equation)
+        # Broadcasting: [batch_size, n_zones or 1] / [n_zones or scalar] -> [batch_size, n_zones]
+        pressure_factor = torch.sqrt(duct_pressure / self.nominal_pressure)
+        # Clamp to reasonable range to prevent unrealistic flows
+        pressure_factor = torch.clamp(pressure_factor, 0.5, 2.0)
+        airflow = base_airflow * pressure_factor
+        
+        # else:
+        #     airflow = base_airflow
 
         return airflow
 

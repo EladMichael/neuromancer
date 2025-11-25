@@ -46,14 +46,22 @@ import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+import os
+if os.environ.get("RUNTIME_TYPING", 1):
+    from beartype import beartype
+else:
+    # passthrough for no type checking
+    def beartype(fn): return fn
 
 from neuromancer.constraint import Variable
+
 
 class Node(nn.Module):
     """
     Simple class to handle cyclic computational graph connections. input_keys and output_keys
     define computational node connections through intermediate dictionaries.
     """
+    @beartype
     def __init__(self, callable, input_keys, output_keys, name=None):
         """
 
@@ -72,7 +80,8 @@ class Node(nn.Module):
         ]
         self.callable, self.name = callable, name
 
-    def forward(self, data):
+    @beartype
+    def forward(self, data: dict[str, torch.Tensor]):
         """
         This call function wraps the callable to receive/send dictionaries of Tensors
 
@@ -310,9 +319,10 @@ class BuildingNode(nn.Module):
         assert len(input_map) == len(self.input_keywords)
         self.input_map = input_map
         # Add time and time delta to input keys
-        self.input_map.update({'t': 't', 'dt': 'dt'})
+        # self.input_map.update({'t': 't', 'dt': 'dt'})
+        self.input_map.update({'t': 't'})
         input_keys = [k for k in self.input_map]
-        input_keys.extend(['t', 'dt'])
+        # input_keys.extend(['t', 'dt'])
         self.input_keys = input_keys
         self.output_keys = self._make_output_keys(component, name)
         self.component = component
@@ -377,23 +387,31 @@ class BuildingSystem(System):
         kwargs.setdefault('name', "BuildingSystem")
         super().__init__(nodes, **kwargs)
 
-    def forward(self, input_dict, t_start: float = 0.0, dt=300.0, warmup=5):
+    @beartype
+    def forward(
+        self, 
+        input_dict: dict[str, torch.Tensor], 
+        warmup=5
+    ):
         """
         Args:
             input_dict: Input data dictionary
-            t_start: Start time [s] if 't' not in input_dict (default: 0.0)
-            dt: Time step [s] if 'dt' not in input_dict (default: 300.0)
             warmup: (int) Number of warmup iterations to converge on initial inputs default=5
 
         Returns:
             Dictionary of trajectory results from System.forward()
         """
         data = input_dict.copy()
-        data = self.setup(data=data, dt=dt)
+        data = self.setup(data=data)
         data = self._warmup_initialization(data, warmup)
         return super().forward(data)
 
-    def _warmup_initialization(self, data, iterations):
+    @beartype
+    def _warmup_initialization(
+        self, 
+        data: dict[str, torch.Tensor], 
+        iterations
+    ):
         """
         Warmup will only execute nodes in the graph which are BuildingNodes.
         This avoids random behavior from Nodes which may be initialized in
@@ -404,6 +422,7 @@ class BuildingSystem(System):
             iterations: Number of warmup iterations to converge on initial inputs default=5
         :return: Input dictionary with initial inputs
         """
+
         with torch.no_grad():
             init_data = {k: v[:, 0] for k, v in data.items()}  # Extract initial guesses from data
             building_nodes = [node for node in self.nodes if isinstance(node, BuildingNode)]
@@ -417,7 +436,7 @@ class BuildingSystem(System):
             data[var][:, 0] = init_data[var]
         return data
 
-    def setup(self, data, dt=300.0):
+    def setup(self, data):
         """
         Initialize ALL component variables for proper time alignment.
         This solves the phenomena of off-by-dt for continuous time
@@ -426,18 +445,9 @@ class BuildingSystem(System):
         data = data.copy()
 
         # Infer simulation parameters
-        batch_size = next(iter(data.values())).shape[0] if data else 1
-        nsteps = data[self.nstep_key].shape[1] if self.nstep_key in data else 1
+        batch_size = data['t'].shape[0] if data else 1
 
-        # Add time parameters if not present
-        if 't' not in data:
-            times = torch.arange(nsteps, dtype=torch.float32) * dt
-            data['t'] = times.unsqueeze(0).expand(batch_size, -1).unsqueeze(-1)
-        else:
-            t_start = data['t'][:, 0].item()
-
-        if 'dt' not in data:
-            data['dt'] = torch.full((batch_size, nsteps), dt).unsqueeze(-1)
+        assert 't' in data, "Time must be in data dict"
 
         # Initialize missing input variables
         building_components = [n for n in self.nodes if isinstance(n, BuildingNode)]
@@ -448,41 +458,38 @@ class BuildingSystem(System):
                     if key in node.component._state_ranges:
                         data[k] = node.component.initial_state_functions()[key](batch_size).unsqueeze(1)
                     else:
-                        data[k] = node.component.input_functions[key](t_start, batch_size).unsqueeze(1)
+                        data[k] = node.component.input_functions[key](
+                            data['t'][0, 0, 0].item(), batch_size
+                        ).unsqueeze(1)
         return data
 
-    def simulate(self,
-                 duration_hours: float = 24.0,
-                 dt_minutes: float = 5.0,
-                 batch_size: int = 1,
-                 external_inputs: Optional[Dict] = None,
-                 t_start: float = 0.0) -> Dict[str, torch.Tensor]:
+    @beartype
+    def simulate(
+        self,
+        data: Dict = None,
+        t_dt: float = 300.0,  # 5 minutes in seconds
+        t_duration: float = 86400.0,  # One day in seconds
+        t_start: float = 18000.0,  # 5 AM in seconds
+    ) -> Dict[str, torch.Tensor]:
         """
         High-level building simulation interface. Really just a wrapper around the forward pass
         of BuildingSystem for easy specification of the simulation window and sampling rate.
 
         Args:
-            duration_hours: Simulation duration [hours]
-            dt_minutes: Time step [minutes]
-            batch_size: Number of parallel simulations
             external_inputs: Custom external input data (optional)
-            t_start: Simulation start time [s]
 
         Returns:
             Dictionary of trajectory results
         """
-        # Setup time parameters
-        dt = dt_minutes * 60.0  # Convert to seconds
-        nsteps = int(duration_hours * 3600 / dt)
 
-        # Prepare input data dictionary
-        data = {} if external_inputs is None else external_inputs.copy()
+        if data is None:
+            data = {}
+            batch_size = 1
+            times = torch.arange(t_start, t_duration, t_dt)
+            data['t'] = times.unsqueeze(0).expand(batch_size, -1).unsqueeze(-1)
+        else:
+            assert 't' in data, "If passing in data to simulation, must include time!"
+            # if self.get('verbose', True):
+            #     print("Ignoring passed time parameters, extracting time from dataset")
 
-        # Add time trajectory for nstep inference
-        times = torch.arange(nsteps, dtype=torch.float32) * dt + t_start
-        data['t'] = times.unsqueeze(0).expand(batch_size, -1).unsqueeze(-1)
-        data['dt'] = torch.full((batch_size, nsteps), dt).unsqueeze(-1)
-
-        return self.forward(data, t_start=t_start, dt=dt)
-
-
+        return self.forward(data)

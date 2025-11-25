@@ -8,8 +8,19 @@ import torch
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 from typing import Dict, List, Tuple, Optional, Union
+from math import floor
+from neuromancer.hvac.building_components.base import BuildingComponent 
+from neuromancer.hvac.building import BuildingSystem 
+
+import os
+if os.environ.get("RUNTIME_TYPING", 1):
+    from beartype import beartype
+else:
+    # passthrough for no type checking
+    def beartype(fn): return fn
 
 
+@beartype
 def simplot(
         model: Union['BuildingComponent', 'BuildingSystem'],
         results: Optional[Dict[str, torch.Tensor]] = None,
@@ -51,73 +62,72 @@ def simplot(
         fig, results = plot_building_simulation(system, duration_hours=24)
     """
     model_name = getattr(model, 'name', model.__class__.__name__)
-
+    
     if results is None:
         # Standard simulation parameters
         sim_kwargs = {
-            'duration_hours': 24.0,
-            'dt_minutes': 5.0,
-            't_start_hour': 5.0,  # Can be standardized name
+            't_duration': 86400.0,
+            'dt': 300,
+            't_start': 5.0*60*60,  # 5 AM
             **kwargs
         }
 
         # Both models use same method and return same format!
         results = model.simulate(**sim_kwargs)
 
-        duration_hours = sim_kwargs['duration_hours']
-        dt_minutes = sim_kwargs['dt_minutes']
-        t_start_hour = sim_kwargs.get('t_start_hour', 5.0)
+        t_duration = sim_kwargs['t']
+        dt = sim_kwargs['dt']
+        t_start = sim_kwargs['t_start']
     else:
         # Extract time parameters from existing results
-        t_start_hour, dt_minutes, duration_hours = _extract_time_params_from_results(results, batch_idx)
+        t_start, dt, t_duration = _extract_time_params_from_results(results, batch_idx)
 
     # Get time vector for plotting - same for both model types
-    time_hours = _create_time_vector(results, batch_idx, t_start_hour, dt_minutes)
+    # time_vec = results['t'][batch_idx, :]
+    # time_vec = _create_time_vector(results, batch_idx, t_start, dt)
 
     # Select and filter variables
     var_names = _select_variables(results, variables)
 
     # Apply time range filtering - same logic for both
-    time_hours_plot, results_plot = _apply_time_range_filter(
-        results, var_names, time_hours, time_range, t_start_hour, batch_idx
-    )
+    # time_hours_plot, results_plot = _apply_time_range_filter(
+    #     results, var_names, time_vec, time_range, t_start, batch_idx
+    # )
 
     # Create the plot
     fig = _create_plot(
-        results_plot, var_names, time_hours_plot, time_range, t_start_hour,
-        duration_hours, dt_minutes, batch_idx, model_name, figsize, title, filename
+        results, var_names, time_range, t_start, t_duration, dt,
+        batch_idx, model_name, figsize, title, filename
     )
 
     return fig, results
 
 
+@beartype
 def _extract_time_params_from_results(results: Dict[str, torch.Tensor],
                                       batch_idx: int) -> Tuple[float, float, float]:
     """Extract time parameters from simulation results - same format for both model types."""
-    if 't' in results:
-        # Both return [batch_size, time] format
-        time_tensor = results['t'][batch_idx, :]
 
-        if len(time_tensor) > 1:
-            dt_minutes = float(time_tensor[1] - time_tensor[0]) / 60.0
-            t_start_hour = float(time_tensor[0]) / 3600.0
-            duration_hours = float(time_tensor[-1] - time_tensor[0]) / 3600.0
-        else:
-            dt_minutes, t_start_hour, duration_hours = 5.0, 0.0, 24.0
-    else:
-        # Fallback defaults
-        dt_minutes, t_start_hour, duration_hours = 5.0, 0.0, 24.0
+    assert 't' in results, "Time not included in results, cannot extract it!"
+    
+    # Both return [batch_size, time] format
+    time_tensor = results['t'][batch_idx, :]
 
-    return t_start_hour, dt_minutes, duration_hours
+    assert time_tensor.shape[0] > 1, "Time tensor is of unit length, can't extract dt"
+
+    dt = float(time_tensor[1] - time_tensor[0])
+    t_start = float(time_tensor[0])
+    t_duration = float(time_tensor[-1] - time_tensor[0])
+    
+    return t_start, dt, t_duration
 
 
+@beartype
 def _create_time_vector(results: Dict[str, torch.Tensor],
                         batch_idx: int,
-                        t_start_hour: float,
-                        dt_minutes: float) -> torch.Tensor:
+                        t_start: float,
+                        dt: float) -> torch.Tensor:
     """Create time vector for plotting - same format for both model types."""
-    dt = dt_minutes * 60.0
-    t_start = t_start_hour * 3600
 
     # Both return [batch_size, time, ...] format
     # Find the maximum time dimension across all variables (excluding 't' and 'dt')
@@ -130,100 +140,100 @@ def _create_time_vector(results: Dict[str, torch.Tensor],
         sample_result = next(iter(results.values()))
         n_steps = sample_result.shape[1]
 
-    time_points = torch.arange(n_steps) * dt + t_start
-    return time_points.cpu().numpy() / 3600.0
+    return torch.arange(t_start, t_start+dt*n_steps, dt)
 
 
+@beartype
 def _select_variables(results: Dict[str, torch.Tensor],
                       variables: Optional[List[str]]) -> List[str]:
+
+    no_plot = ['t_start', 'dt', 't_duration']
+
     """Select which variables to plot."""
     if variables is None:
         # Plot all variables except time parameters
-        var_names = [k for k in results.keys() if k not in ['t', 'dt']]
+        var_names = list(results.keys())
     else:
         var_names = []
         for var in variables:
-            if var in results:
-                var_names.append(var)
-            else:
-                print(f"Warning: Variable '{var}' not found in results. Available: {list(results.keys())}")
+            assert var in results, f"{var} not in results for plotting"
+            var_names.append(var)
+            
+    assert var_names, "No variables found for plotting"
 
-    if not var_names:
-        raise ValueError("No valid variables to plot")
-
-    return var_names
+    return [v for v in var_names if v not in no_plot]
 
 
-def _apply_time_range_filter(results: Dict[str, torch.Tensor],
-                             var_names: List[str],
-                             time_hours: torch.Tensor,
-                             time_range: Optional[Tuple[float, float]],
-                             t_start_hour: float,
-                             batch_idx: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    """Apply time range filtering to results - same format for both model types."""
-    results_plot = {}
+# def _apply_time_range_filter(results: Dict[str, torch.Tensor],
+#                              var_names: List[str],
+#                              time_vec: torch.Tensor,
+#                              time_range: Optional[Tuple[float, float]],
+#                              t_start: float,
+#                              batch_idx: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+#     """Apply time range filtering to results - same format for both model types."""
+#     results_plot = {}
 
-    # Process each variable and ensure time alignment
-    for var in var_names:
-        data = results[var][batch_idx, :].detach().cpu().numpy()
+#     # Process each variable and ensure time alignment
+#     for var in var_names:
+#         data = results[var][batch_idx, :].detach().cpu().numpy()
 
-        # Handle potential mismatch between time and data lengths
-        if len(data) != len(time_hours):
-            if len(data) == len(time_hours) + 1:
-                # Data has one more point than time (initial condition + n steps)
-                # Create extended time array
-                dt_hours = time_hours[1] - time_hours[0] if len(time_hours) > 1 else 1/12  # 5min default
-                extended_time = torch.cat([
-                    torch.tensor([time_hours[0] - dt_hours]),
-                    torch.tensor(time_hours)
-                ])
-                time_hours_for_var = extended_time
-            elif len(data) == len(time_hours) - 1:
-                # Data has one fewer point than time
-                time_hours_for_var = time_hours[:-1]
-            else:
-                # Other mismatches - truncate to shorter length
-                min_len = min(len(data), len(time_hours))
-                data = data[:min_len]
-                time_hours_for_var = time_hours[:min_len]
-        else:
-            time_hours_for_var = time_hours
+#         # Handle potential mismatch between time and data lengths
+#         if len(data) != len(time_hours):
+#             if len(data) == len(time_hours) + 1:
+#                 # Data has one more point than time (initial condition + n steps)
+#                 # Create extended time array
+#                 dt_hours = time_hours[1] - time_hours[0] if len(time_hours) > 1 else 1/12  # 5min default
+#                 extended_time = torch.cat([
+#                     torch.tensor([time_hours[0] - dt_hours]),
+#                     torch.tensor(time_hours)
+#                 ])
+#                 time_hours_for_var = extended_time
+#             elif len(data) == len(time_hours) - 1:
+#                 # Data has one fewer point than time
+#                 time_hours_for_var = time_hours[:-1]
+#             else:
+#                 # Other mismatches - truncate to shorter length
+#                 min_len = min(len(data), len(time_hours))
+#                 data = data[:min_len]
+#                 time_hours_for_var = time_hours[:min_len]
+#         else:
+#             time_hours_for_var = time_hours
 
-        # Store the aligned time for this variable
-        if var == var_names[0]:  # Use first variable's time as reference
-            time_hours_plot = time_hours_for_var
+#         # Store the aligned time for this variable
+#         if var == var_names[0]:  # Use first variable's time as reference
+#             time_hours_plot = time_hours_for_var
 
-        results_plot[var] = data
+#         results_plot[var] = data
 
-    # Apply time range filtering if specified
-    if time_range is not None:
-        start_hour, end_hour = time_range
-        start_abs = t_start_hour + start_hour
-        end_abs = t_start_hour + end_hour
+#     # Apply time range filtering if specified
+#     if time_range is not None:
+#         start_hour, end_hour = time_range
+#         start_abs = t_start_hour + start_hour
+#         end_abs = t_start_hour + end_hour
 
-        # Find indices for time range
-        mask = (time_hours_plot >= start_abs) & (time_hours_plot <= end_abs)
-        time_hours_plot = time_hours_plot[mask]
+#         # Find indices for time range
+#         mask = (time_hours_plot >= start_abs) & (time_hours_plot <= end_abs)
+#         time_hours_plot = time_hours_plot[mask]
 
-        # Filter all results with the same mask
-        for var in var_names:
-            if len(results_plot[var]) == len(mask):
-                results_plot[var] = results_plot[var][mask]
-            else:
-                # Handle length mismatch in masking
-                var_mask = mask[:len(results_plot[var])]
-                results_plot[var] = results_plot[var][var_mask]
+#         # Filter all results with the same mask
+#         for var in var_names:
+#             if len(results_plot[var]) == len(mask):
+#                 results_plot[var] = results_plot[var][mask]
+#             else:
+#                 # Handle length mismatch in masking
+#                 var_mask = mask[:len(results_plot[var])]
+#                 results_plot[var] = results_plot[var][var_mask]
 
-    return time_hours_plot, results_plot
+#     return time_hours_plot, results_plot
 
 
-def _create_plot(results_plot: Dict[str, torch.Tensor],
+@beartype
+def _create_plot(results: Dict[str, torch.Tensor],
                  var_names: List[str],
-                 time_hours_plot: torch.Tensor,
                  time_range: Optional[Tuple[float, float]],
-                 t_start_hour: float,
-                 duration_hours: float,
-                 dt_minutes: float,
+                 t_start: float,
+                 t_duration: float,
+                 dt: float,
                  batch_idx: int,
                  model_name: str,
                  figsize: Optional[Tuple[float, float]],
@@ -242,43 +252,39 @@ def _create_plot(results_plot: Dict[str, torch.Tensor],
     if n_vars == 1:
         axes = [axes]
 
+    time_vec = results['t'][batch_idx, :].cpu().numpy().flatten()
+
     for i, var in enumerate(var_names):
-        data = results_plot[var]
+        data = results[var]
 
-        # Handle different tensor dimensions
-        if data.ndim >= 2:
-            # For multi-dimensional outputs, plot first dimension
-            if data.shape[1] == 1:  # Shape like [time, 1]
-                y_data = data[:, 0]
-            elif data.ndim == 2:  # Shape like [time, features]
-                y_data = data[:, 0]  # Plot first feature
-            else:  # Shape like [time, zone1, zone2, ...]
-                y_data = data[:, 0]  # Plot first zone/feature
-        else:  # 1D data
-            y_data = data
+        if not hasattr(data, 'ndim'):
+            print(f"Asked to plot {data} which seems to be scalar")
+            continue
+        elif data.ndim != 3:
+            print(f"Data has wrong shape {data.shape}, should be (batch, steps, features)")
 
-        # Ensure time and data arrays have compatible lengths
-        time_plot = time_hours_plot[:len(y_data)]
-
-        axes[i].plot(time_plot, y_data, label=var, linewidth=1.5)
+        # Everything should be shaped like (batches, steps, features)
+        for feat in range(data.shape[2]):
+            axes[i].plot(time_vec, data[batch_idx, :, feat], 
+                         label=var+f' {feat}', linewidth=1.5)
         axes[i].set_ylabel(var)
         axes[i].grid(True, alpha=0.3)
         axes[i].legend(loc='best')
 
         # Add value annotations for zoomed plots
-        if time_range and len(time_plot) < 100:
-            # Annotate start and end values for short time series
-            axes[i].annotate(f'{y_data[0]:.3f}',
-                             xy=(time_plot[0], y_data[0]),
-                             xytext=(5, 5), textcoords='offset points',
-                             fontsize=8, alpha=0.7)
-            axes[i].annotate(f'{y_data[-1]:.3f}',
-                             xy=(time_plot[-1], y_data[-1]),
-                             xytext=(5, 5), textcoords='offset points',
-                             fontsize=8, alpha=0.7)
+        # if time_range and len(time_vec) < 100:
+        #     # Annotate start and end values for short time series
+        #     axes[i].annotate(f'{y_data[0]:.3f}',
+        #                      xy=(time_vec[0], y_data[0]),
+        #                      xytext=(5, 5), textcoords='offset points',
+        #                      fontsize=8, alpha=0.7)
+        #     axes[i].annotate(f'{y_data[-1]:.3f}',
+        #                      xy=(time_vec[-1], y_data[-1]),
+        #                      xytext=(5, 5), textcoords='offset points',
+        #                      fontsize=8, alpha=0.7)
 
     # Apply time formatting
-    time_formatter = _create_time_formatter(t_start_hour, time_range)
+    time_formatter = _create_time_formatter(t_start, time_range)
 
     for ax in axes:
         ax.xaxis.set_major_formatter(FuncFormatter(time_formatter))
@@ -294,26 +300,24 @@ def _create_plot(results_plot: Dict[str, torch.Tensor],
     if time_range and (time_range[1] - time_range[0]) <= 4:
         axes[-1].set_xlabel("Time")
     else:
-        start_hour_12 = t_start_hour % 12
-        if start_hour_12 == 0:
-            start_hour_12 = 12
-        start_am_pm = "AM" if t_start_hour < 12 else "PM"
-        axes[-1].set_xlabel(f"Time (Starting {int(start_hour_12)} {start_am_pm})")
+        hour_of_day = floor((t_start % 86400) / 3600)
+        hour_12 = ((hour_of_day - 1) % 12) + 1 
+        start_am_pm = "AM" if hour_of_day < 12 else "PM"
+        axes[-1].set_xlabel(f"Time (Starting {int(hour_12)} {start_am_pm})")
 
     # Set title
     if title is None:
         if time_range:
             title = (f"{model_name} Simulation: "
                      f"{time_range[1] - time_range[0]:.1f} hours "
-                     f"(dt={dt_minutes:.1f}min, batch={batch_idx})")
+                     f"(dt={dt:.1f}sec, batch={batch_idx})")
         else:
-            start_hour_12 = t_start_hour % 12
-            if start_hour_12 == 0:
-                start_hour_12 = 12
-            start_am_pm = "AM" if t_start_hour < 12 else "PM"
+            hour_of_day = floor((t_start % 86400) / 3600)
+            hour_12 = ((hour_of_day - 1) % 12) + 1 
+            start_am_pm = "AM" if hour_of_day < 12 else "PM"
             title = (f"{model_name} Simulation: "
-                     f"{duration_hours:.1f} hours from {int(start_hour_12)} {start_am_pm} "
-                     f"(dt={dt_minutes:.1f}min, batch={batch_idx})")
+                     f"{t_duration/3600:.1f} hours from {int(hour_12)} {start_am_pm} "
+                     f"(dt={dt:.1f}sec, batch={batch_idx})")
 
     fig.suptitle(title, y=1.02)
     fig.tight_layout()
@@ -324,26 +328,22 @@ def _create_plot(results_plot: Dict[str, torch.Tensor],
     return fig
 
 
-def _create_time_formatter(t_start_hour: float,
+@beartype
+def _create_time_formatter(t_start: float,
                            time_range: Optional[Tuple[float, float]] = None):
     """Create time formatter for matplotlib."""
 
     def format_time_tick(x, pos):
-        hour_24 = (t_start_hour + x) % 24
+        t_of_day = (t_start + x) % 86400
+        # ((a-1) % p) + 1 makes the resulting zeros equal p
+        h = int(t_of_day / 3600)
+        h_12 = ((h-1) % 12) + 1  
+        m = int(t_of_day / 60)
+        am_pm = "AM" if h < 12 else "PM"
 
         if time_range and (time_range[1] - time_range[0]) <= 4:
-            h = int(hour_24)
-            m = int((hour_24 % 1) * 60)
-            am_pm = "AM" if h < 12 else "PM"
-            h_12 = h % 12
-            if h_12 == 0:
-                h_12 = 12
             return f"{h_12}:{m:02d} {am_pm}"
         else:
-            hour_12 = hour_24 % 12
-            if hour_12 == 0:
-                hour_12 = 12
-            am_pm = "AM" if hour_24 < 12 else "PM"
-            return f"{int(hour_12)} {am_pm}"
+            return f"{int(h_12)} {am_pm}"
 
     return format_time_tick

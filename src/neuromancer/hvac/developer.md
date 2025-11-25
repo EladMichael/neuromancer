@@ -4,6 +4,9 @@
 
 Use unit-based prefixes for physical quantities to enable immediate unit recognition:
 
+- **`t_*`** → Time in Seconds [s]  
+  Examples: `t_duration`, `t_init`, `t_sampling`, `t_step`
+
 - **`T_*`** → Temperature in Kelvin [K]  
   Examples: `T_supply`, `T_zone`, `T_setpoint`, `T_outdoor`
 
@@ -31,7 +34,7 @@ Use unit-based prefixes for physical quantities to enable immediate unit recogni
 - **`ctrl_*`** → Control-related parameters  
   Examples: `ctrl_deadband`, `ctrl_integral_time`, `ctrl_Kp`
 
-## Time Constants
+## Process Specific Time Constants
 
 - **`tau_*`** → Time constants in seconds [s]  
   Examples: `tau_damper`, `tau_thermal`
@@ -90,8 +93,7 @@ All BuildingComponent classes should implement context-aware `initial_state_func
 ```python
 # Environmental conditions
 T_outdoor: float          # [K] Outdoor air temperature
-time_of_day: float        # [hr] Hour of day (0-24)
-day_of_year: int          # [day] Day of year (1-365)
+t_context: int          # [sec] seconds from epoch
 weather_factor: float     # [-] Sky clarity (0=overcast, 1=clear)
 
 # Building operating state

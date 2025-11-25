@@ -60,8 +60,16 @@ import torch
 from .base import BuildingComponent
 from ..actuators.damper import Damper
 from ..actuators.electric_reheat_coil import ElectricReheatCoil
+import neuromancer.hvac.simclock as simclock
+import os
+if os.environ.get("RUNTIME_TYPING", 1):
+    from beartype import beartype
+else:
+    # passthrough for no type checking
+    def beartype(fn): return fn
 
 
+@beartype
 def calculate_reheat_load(airflow: torch.Tensor, cp_air: torch.Tensor,
                           T_current: torch.Tensor, T_min: torch.Tensor) -> torch.Tensor:
     """
@@ -174,6 +182,7 @@ class VAVBox(BuildingComponent):
         "total_power": (0.0, 5500.0),  # [W] Total power consumption
     }
 
+    @beartype
     def __init__(
             self,
             n_zones: int = 1,
@@ -249,11 +258,11 @@ class VAVBox(BuildingComponent):
         self.electric_reheat_coil = ElectricReheatCoil(
             max_thermal_output=self.Q_reheat_max,      # [n_zones] tensor from base class
             heating_characteristic=heating_characteristic,
-            electrical_efficiency=self.reheat_efficiency, # [n_zones] tensor from base class
             tau=self.tau_reheat,                          # [n_zones] tensor from base class
             actuator_model=actuator_model
         )
 
+    @beartype
     def forward(
             self, *,
             t: float,
@@ -263,7 +272,7 @@ class VAVBox(BuildingComponent):
             P_duct: torch.Tensor,            # [batch_size, 1]
             damper_position: torch.Tensor,   # [batch_size, n_zones]
             reheat_position: torch.Tensor,   # [batch_size, n_zones]
-            dt: float = 1.0,
+            dt: float,
     ) -> dict:
         """
         Calculate VAV box supply air conditions for one simulation time step.
@@ -470,30 +479,25 @@ class VAVBox(BuildingComponent):
         """
         if not hasattr(self, "_input_functions"):
             # Get context values with fallbacks
-            T_setpoint_base = self.context.get("T_setpoint_base", 293.15)  # Default: 20°C
-            T_supply_base = self.context.get("T_supply_base", 286.15)  # Default: 13°C
-            day_of_year = self.context.get("day_of_year", 100)
-            occupancy_state = self.context.get("occupancy_state", "occupied")
-            system_mode = self.context.get("system_mode", "cooling")
-            P_duct_base = self.context.get("P_duct_base", 600.0)  # Default: 600 Pa
 
-            def day_of_year_fn(t):
-                """Context-aware day of year with progression."""
-                # Start from context day and progress with simulation time
-                sim_days = t / 86400.0
-                current_day = (day_of_year + sim_days) % 365
-                if current_day == 0:
-                    current_day = 365
-                return current_day
+            req_keys = ['system_mode', 'occupancy_state', 'T_setpoint_base',
+                        'T_supply_base', 'P_duct_base']
+            assert all(key in self.context for key in req_keys), "Context does not contain required keys!"
+
+            T_setpoint_base = self.context.get("T_setpoint_base")  
+            T_supply_base = self.context.get("T_supply_base")
+            occupancy_state = self.context.get("occupancy_state")
+            system_mode = self.context.get("system_mode")
+            P_duct_base = self.context.get("P_duct_base")  # Default: 600 Pa
 
             def T_zone_fn(t, batch_size=1):
-                current_hour = (t / 3600.0) % 24
-                day_of_year = day_of_year_fn(t)
+                h_of_day = simclock.hour_of_day(t)
+                d_of_year = simclock.day_of_year(t)
                 # Zone temperature varies around setpoint based on occupancy and time
                 if occupancy_state == "occupied":
-                    if 8 <= current_hour <= 17:  # Business hours
+                    if 8 <= h_of_day <= 17:  # Business hours
                         temp_rise = 1.5  # Zones run slightly warm during peak occupancy
-                    elif 7 <= current_hour < 8 or 17 < current_hour <= 19:  # Transition
+                    elif 7 <= h_of_day < 8 or 17 < h_of_day <= 19:  # Transition
                         temp_rise = 0.5  # Slight temperature rise
                     else:
                         temp_rise = -0.5  # Cooler at night
@@ -503,8 +507,8 @@ class VAVBox(BuildingComponent):
                     temp_rise = 0.0  # Near setpoint during startup
 
                 # Add small daily variation and solar effects
-                daily_variation = 0.5 * torch.sin(torch.tensor(2 * torch.pi * (current_hour - 14) / 24))
-                seasonal_variation = 0.3 * torch.sin(torch.tensor(2 * torch.pi * (day_of_year - 80) / 365))
+                daily_variation = 0.5 * torch.sin(torch.tensor(2 * torch.pi * (h_of_day - 14) / 24))
+                seasonal_variation = 0.3 * torch.sin(torch.tensor(2 * torch.pi * (d_of_year - 80) / 365))
 
                 T_zone = T_setpoint_base + temp_rise + daily_variation + seasonal_variation
                 return torch.full((batch_size, self.n_zones), T_zone,
@@ -512,10 +516,10 @@ class VAVBox(BuildingComponent):
 
             def T_setpoint_fn(t, batch_size=1):
                 """Context-aware zone setpoints with schedule adjustments."""
-                current_hour = (t / 3600.0) % 24
+                h_of_day = simclock.hour_of_day(t)
 
                 if occupancy_state == "occupied":
-                    if 8 <= current_hour <= 17:  # Business hours
+                    if 8 <= h_of_day <= 17:  # Business hours
                         setpoint = T_setpoint_base  # Normal setpoint
                     else:
                         setpoint = T_setpoint_base + 1.0  # Slightly relaxed after hours
@@ -533,11 +537,11 @@ class VAVBox(BuildingComponent):
 
             def T_supply_upstream_fn(t, batch_size=1):
                 """Context-aware upstream supply temperature from RTU."""
-                current_hour = (t / 3600.0) % 24
-
+                h_of_day = simclock.hour_of_day(t)
+                d_of_year = simclock.day_of_year(t)
                 # Supply temperature varies with load and system mode
                 if occupancy_state == "occupied":
-                    if 8 <= current_hour <= 17:  # Peak hours
+                    if 8 <= h_of_day <= 17:  # Peak hours
                         supply_temp = T_supply_base  # Design supply temperature
                     else:
                         # Warmer supply air after hours (less aggressive conditioning)
@@ -550,7 +554,7 @@ class VAVBox(BuildingComponent):
                     supply_temp = T_supply_base + 1.0
 
                 # Seasonal adjustment for realistic operation
-                seasonal_adjustment = 1.0 * torch.sin(torch.tensor(2 * torch.pi * (day_of_year - 80) / 365))
+                seasonal_adjustment = 1.0 * torch.sin(torch.tensor(2 * torch.pi * (d_of_year - 80) / 365))
                 supply_temp = supply_temp + seasonal_adjustment
 
                 return torch.full((batch_size, 1), supply_temp,
@@ -558,11 +562,11 @@ class VAVBox(BuildingComponent):
 
             def P_duct_fn(t, batch_size=1):
                 """Context-aware duct pressure based on system operation."""
-                current_hour = (t / 3600.0) % 24
+                h_of_day = simclock.hour_of_day(t)
 
                 # Duct pressure varies with system load
                 if occupancy_state == "occupied":
-                    if 8 <= current_hour <= 17:  # Business hours
+                    if 8 <= h_of_day <= 17:  # Business hours
                         duct_pressure = P_duct_base  # Design pressure
                     else:
                         duct_pressure = P_duct_base * 0.7  # Reduced pressure after hours

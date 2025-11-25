@@ -27,6 +27,13 @@ import torch
 import math
 from typing import Union, List
 from .base import BuildingComponent
+import neuromancer.hvac.simclock as simclock
+import os
+if os.environ.get("RUNTIME_TYPING", 1):
+    from beartype import beartype
+else:
+    # passthrough for no type checking
+    def beartype(fn): return fn
 
 
 class SolarGains(BuildingComponent):
@@ -53,7 +60,6 @@ class SolarGains(BuildingComponent):
     _external_ranges = {
         "T_outdoor": (253.15, 318.15),  # [K] Outdoor temperature (-20°C to 45°C)
         "weather_factor": (0.0, 1.0),  # [-] Weather clarity (0=overcast, 1=clear)
-        "day_of_year": (1.0, 365.0),  # [-] Day of year
     }
 
     _zone_param_ranges = {
@@ -73,6 +79,7 @@ class SolarGains(BuildingComponent):
         "Q_solar": (0.0, 10000.0),  # [W] Solar gains per zone
     }
 
+    @beartype
     def __init__(
             self,
             # Zone specifications
@@ -117,12 +124,12 @@ class SolarGains(BuildingComponent):
         # self.window_orientation: [n_zones] tensor
         # self.window_shgc: [n_zones] tensor
 
+    @beartype
     def estimate_solar_irradiance(
             self,
             t: torch.Tensor,
             T_outdoor: torch.Tensor,
             weather_factor: torch.Tensor,
-            day_of_year: torch.Tensor
     ) -> torch.Tensor:
         """
         Estimate solar irradiance from outdoor temperature and weather patterns.
@@ -133,24 +140,24 @@ class SolarGains(BuildingComponent):
         - Weather factors modulate both temperature and solar gains
 
         Args:
-            t: Time of day [s] since midnight, shape [batch_size, 1]
+            t: seconds from epoch [s], shape [batch_size, 1]
             T_outdoor: Outdoor air temperature [K], shape [batch_size, 1]
             weather_factor: Weather clarity [0-1], shape [batch_size, 1]
-            day_of_year: Day of year [1-365], shape [batch_size, 1]
 
         Returns:
             torch.Tensor: Estimated solar irradiance [W/m²], shape [batch_size, 1]
         """
-        # Convert time to hours
-        hour_of_day = t / 3600.0  # [batch_size, 1]
 
         # Solar position approximation (simplified)
         # Declination angle (seasonal variation)
-        day_angle = 2 * math.pi * (day_of_year - 81) / 365  # [batch_size, 1]
+        h_of_day = simclock.hours_of_day(t)
+        d_of_year = simclock.days_of_year(t)
+
+        day_angle = 2 * math.pi * (d_of_year - 81) / 365  # [batch_size, 1]
         declination = 23.45 * math.pi / 180 * torch.sin(day_angle)  # [batch_size, 1]
 
         # Hour angle
-        hour_angle = (hour_of_day - 12) * 15 * math.pi / 180  # [batch_size, 1]
+        hour_angle = (h_of_day - 12) * 15 * math.pi / 180  # [batch_size, 1]
 
         # Solar elevation (simplified)
         lat = torch.full_like(declination, self.latitude_rad)
@@ -177,12 +184,12 @@ class SolarGains(BuildingComponent):
 
         return torch.clamp(estimated_irradiance, 0.0, self.max_solar_irradiance)
 
+    @beartype
     def calculate_solar_gains(
             self,
             t: torch.Tensor,
             T_outdoor: torch.Tensor,
             weather_factor: torch.Tensor,
-            day_of_year: torch.Tensor,
 
     ) -> torch.Tensor:
         """
@@ -192,13 +199,12 @@ class SolarGains(BuildingComponent):
             t: Time of day [s], shape [batch_size, 1]
             T_outdoor: Outdoor temperature [K], shape [batch_size, 1]
             weather_factor: Weather clarity [0-1], shape [batch_size, 1]
-            day_of_year: Day of year [1-365], shape [batch_size, 1]
 
         Returns:
             torch.Tensor: Solar heat gains [W], shape [batch_size, n_zones]
         """
         # Estimate solar irradiance
-        irradiance = self.estimate_solar_irradiance(t, T_outdoor, weather_factor, day_of_year)
+        irradiance = self.estimate_solar_irradiance(t, T_outdoor, weather_factor)
         # [batch_size, 1]
 
         # Calculate solar gains for each zone
@@ -216,13 +222,13 @@ class SolarGains(BuildingComponent):
 
         return Q_solar
 
+    @beartype
     def forward(
             self, *,
             t: float,  # [s] Time of day
             T_outdoor: torch.Tensor,  # [K] Outdoor temperature, shape [batch_size, 1]
             weather_factor: torch.Tensor,  # [-] Weather clarity, shape [batch_size, 1]
-            day_of_year: torch.Tensor,  # [-] Day of year, shape [batch_size, 1]
-            dt: float = 1.0,  # [s] Time step (unused but required by interface)
+            dt: float = None,  # [s] Time step (unused but required by interface)
     ) -> dict:
         """
         Calculate solar heat gains to building zones.
@@ -231,7 +237,6 @@ class SolarGains(BuildingComponent):
             t: Time of day [s] since midnight
             T_outdoor: Outdoor air temperature [K], shape [batch_size, 1]
             weather_factor: Weather clarity factor [0-1], shape [batch_size, 1]
-            day_of_year: Day of year [1-365], shape [batch_size, 1]
             dt: Time step [s] (unused but required by BuildingComponent interface)
 
         Returns:
@@ -242,7 +247,7 @@ class SolarGains(BuildingComponent):
         t_tensor = torch.full_like(T_outdoor, float(t))
 
         # Calculate solar gains
-        Q_solar = self.calculate_solar_gains(t_tensor, T_outdoor, weather_factor, day_of_year)
+        Q_solar = self.calculate_solar_gains(t_tensor, T_outdoor, weather_factor)
 
         self.diagnostics = {}
 
@@ -263,24 +268,27 @@ class SolarGains(BuildingComponent):
         """
         if not hasattr(self, '_input_functions'):
             # Get context values with fallbacks
-            T_outdoor_base = self.context.get("T_outdoor", 293.15)  # Default: 20°C
-            day_of_year = self.context.get("day_of_year", 100)
-            weather_factor_base = self.context.get("weather_factor", 0.7)  # Default: partly cloudy
+
+            req_keys = ['T_outdoor', 'weather_factor']
+            assert all(key in self.context for key in req_keys), "Context does not contain required keys!"
+
+            T_outdoor_base = self.context.get("T_outdoor")  # Default: 20°C
+            weather_factor_base = self.context.get("weather_factor")  # Default: partly cloudy
 
             def weather_factor_fn(t, batch_size=1):
                 """Context-aware weather factor with day/night cycle."""
                 # Calculate current hour using context time as baseline
-                current_hour = (t / 3600.0) % 24
+                h_of_day = simclock.hour_of_day(t)
 
                 # Weather factor follows solar availability (zero at night)
-                if 6 <= current_hour <= 18:  # Daylight hours
+                if 6 <= h_of_day <= 18:  # Daylight hours
                     # Use context weather factor during daylight
                     weather_factor = weather_factor_base
 
                     # Add realistic cloud variation during the day
-                    cloud_variation = 0.1 * torch.sin(torch.tensor(2 * torch.pi * (current_hour - 10) / 8))
+                    cloud_variation = 0.1 * torch.sin(torch.tensor(2 * torch.pi * (h_of_day - 10) / 8))
                     weather_factor = torch.clamp(
-                        torch.tensor(weather_factor + cloud_variation), 0.0, 1.0
+                        weather_factor + cloud_variation, 0.0, 1.0
                     )
                 else:
                     # No solar radiation at night
@@ -289,28 +297,16 @@ class SolarGains(BuildingComponent):
                 return torch.full((batch_size, 1), weather_factor,
                                   device=self.device, dtype=self.dtype)
 
-            def day_of_year_fn(t, batch_size=1):
-                """Context-aware day of year with progression."""
-                # Start from context day and progress with simulation time
-                sim_days = t / 86400.0
-                current_day = (day_of_year + sim_days) % 365
-                if current_day == 0:
-                    current_day = 365
-
-                return torch.full((batch_size, 1), current_day,
-                                  device=self.device, dtype=self.dtype)
-
             def T_outdoor_fn(t, batch_size=1):
                 daily_amplitude = 10.0
                 peak_hour = 14.
                 seasonal_amplitude = 20.0
                 base_temp = T_outdoor_base
-                day_of_year = day_of_year_fn(t).item()
-                t_hr = t / 3600.0
-                if day_of_year is None:
-                    day_of_year = int((t / 86400) % 365) + 1
-                daily_temp = daily_amplitude * np.sin(2 * np.pi * (t_hr - peak_hour) / 24)
-                seasonal_temp = seasonal_amplitude * np.sin(2 * np.pi * (day_of_year - 80) / 365)
+                d_of_year = simclock.day_of_year(t)
+                h_of_day = simclock.hour_of_day(t)
+
+                daily_temp = daily_amplitude * np.sin(2 * np.pi * (h_of_day - peak_hour) / 24)
+                seasonal_temp = seasonal_amplitude * np.sin(2 * np.pi * (d_of_year - 80) / 365)
                 total_temp = base_temp + daily_temp + seasonal_temp
                 total_temp = torch.full((batch_size, 1), total_temp)
                 return total_temp
@@ -318,7 +314,6 @@ class SolarGains(BuildingComponent):
             self._input_functions = {
                 "T_outdoor": T_outdoor_fn,
                 "weather_factor": weather_factor_fn,
-                "day_of_year": day_of_year_fn,
             }
         return self._input_functions
 

@@ -15,7 +15,14 @@ ZONE VECTORIZATION SUPPORT:
 import torch
 import numpy as np
 from torchdiffeq import odeint
+import neuromancer.hvac.simclock as simclock
 from .base import BuildingComponent
+import os
+if os.environ.get("RUNTIME_TYPING", 1):
+    from beartype import beartype 
+else:
+    # passthrough for no type checking
+    def beartype(fn): return fn
 
 
 class Envelope(BuildingComponent):
@@ -110,21 +117,22 @@ class Envelope(BuildingComponent):
         "ode_atol": (1e-10, 1e-5), # Absolute tolerance
     }
 
+    @beartype
     def __init__(
             self,
             n_zones: int = 1,
             # Zone-specific parameters (can be scalar or list[n_zones])
-            R_env: float = 0.1,     # [K/W] Envelope resistance per zone
-            C_env: float = 1e6,     # [J/K] Thermal capacitance per zone
-            # Shared parameters (scalars only)
-            R_internal: float = 0.02,  # [K/W] Inter-zone resistance
+            R_env: float | list = 0.1,     # [K/W] Envelope resistance per zone
+            C_env: float | list = 1e6,     # [J/K] Thermal capacitance per zone
+            # Shared parameters
+            R_internal: float | list | np.ndarray | torch.Tensor = 0.02,  # [K/W] Inter-zone resistances
             adjacency_threshold: float = 0.5,  # [0-1] Adjacency threshold
             # ODE solver parameters
             ode_method: str = 'dopri5',  # ODE integration method
             ode_rtol: float = 1e-5,      # Relative tolerance
             ode_atol: float = 1e-7,      # Absolute tolerance
             # Special adjacency matrix parameter
-            adjacency: torch.Tensor = None,  # [n_zones, n_zones] Zone connectivity
+            adjacency: list | np.ndarray | torch.Tensor = None,  # [n_zones, n_zones] Zone connectivity
             # Standard parameters
             learnable: set = None,
             device: torch.device = None,
@@ -144,7 +152,7 @@ class Envelope(BuildingComponent):
                 Controls heat exchange rate between zones and outdoor environment.
             C_env (float or list): Thermal capacitance [J/K].
                 Controls thermal mass and temperature response rate of each zone.
-            R_internal (float): Inter-zone thermal resistance [K/W] - shared across all zone pairs.
+            R_internal (float or Iterable): Inter-zone thermal resistances [K/W].
                 Controls heat transfer rate between adjacent zones.
             adjacency_threshold (float): Threshold for discretizing learned adjacency matrix [0-1].
                 Used during evaluation to convert continuous connectivity to discrete.
@@ -161,8 +169,8 @@ class Envelope(BuildingComponent):
 
         # Handle adjacency matrix setup before calling super().__init__
         # Create connection indices for upper triangular matrix (excluding diagonal)
+
         connection_indices = torch.triu_indices(n_zones, n_zones, offset=1)
-        n_connections = connection_indices.shape[1]
 
         # Handle adjacency matrix parameter setup
         learnable = set(learnable) if learnable else set()
@@ -171,6 +179,8 @@ class Envelope(BuildingComponent):
             # Default: all zones connected except self-connections
             adjacency = torch.ones((n_zones, n_zones), dtype=dtype, device=device)
             adjacency.fill_diagonal_(0)
+        else:
+            adjacency = torch.tensor(adjacency)
 
         # Store adjacency representation based on whether it's learnable
         if 'adjacency' in learnable:
@@ -182,7 +192,14 @@ class Envelope(BuildingComponent):
             learnable.add('adj_logits')
         else:
             # Fixed adjacency: store full matrix
-            adj_logits = adjacency
+            adj_logits = torch.logit(adjacency.clamp(1e-4, 1 - 1e-4))
+
+        if isinstance(R_internal, float):
+            R_internal = torch.ones(n_zones, n_zones) * R_internal
+        else:
+            R_internal = torch.tensor(R_internal)
+            assert R_internal.shape == (n_zones, n_zones), f"Internal Resista\
+            nce [Shape {R_internal.shape}] must have shape (n_zones, n_zones)"
 
         # Handle R_internal similar to adjacency if it's learnable
         if 'R_internal' in learnable:
@@ -191,13 +208,16 @@ class Envelope(BuildingComponent):
             learnable.remove('R_internal')
             learnable.add('R_internal_logits')
         else:
-            R_internal_logits = R_internal
+            # Store fixed resistances
+            assert torch.all(R_internal >= 0), "Internal resistances must be non-negative"
+            R_internal_logits = torch.log(R_internal.clamp(1e-8, torch.inf))
 
         super().__init__(params=locals(), learnable=learnable, device=device, dtype=dtype)
 
         # Store connection indices as buffer
         self.register_buffer('connection_indices', connection_indices)
 
+    @beartype
     def _reconstruct_symmetric_matrix(self, connection_values: torch.Tensor) -> torch.Tensor:
         """
         Reconstruct a symmetric matrix from upper-triangular connection values.
@@ -218,33 +238,25 @@ class Envelope(BuildingComponent):
         matrix[self.connection_indices[0], self.connection_indices[1]] = connection_values
 
         # Make symmetric: matrix[i,j] = matrix[j,i]
-        matrix = matrix + matrix.T
-
-        return matrix
+        return matrix + matrix.T
 
     @property
     def R_internal_matrix(self) -> torch.Tensor:
         """
-        Get resistance matrix with optimized path for fixed vs learnable cases.
+        Get resistance matrix
 
         Returns:
             Tensor: Full resistance matrix (n_zones, n_zones) with zeros on diagonal.
                    All resistance values are guaranteed positive.
         """
-        if hasattr(self, 'R_internal_logits') and 'R_internal_logits' in self._parameters:
-            # Learnable: exponential ensures positive resistances
-            R_values = torch.exp(self.R_internal_logits)
-            # Create full matrix with this resistance value
-            R_matrix = torch.full((self.n_zones, self.n_zones), R_values.item(),
-                                  device=self.device, dtype=self.dtype)
-            R_matrix.fill_diagonal_(0)  # No self-connections
-            return R_matrix
-        else:
-            # Fixed: create matrix from scalar value
-            R_matrix = torch.full((self.n_zones, self.n_zones), self.R_internal_logits,
-                                  device=self.device, dtype=self.dtype)
-            R_matrix.fill_diagonal_(0)  # No self-connections
-            return R_matrix
+        
+        # Exponential ensures positive resistances
+        R_values = torch.exp(self.R_internal_logits)
+        # Create full matrix with this resistance value
+        R_matrix = torch.full((self.n_zones, self.n_zones), R_values.item(),
+                              device=self.device, dtype=self.dtype)
+        R_matrix.fill_diagonal_(0)  # No self-connections
+        return R_matrix
 
     @property
     def adjacency_matrix(self) -> torch.Tensor:
@@ -256,7 +268,7 @@ class Envelope(BuildingComponent):
                    During training: continuous values in [0,1] for gradients
                    During evaluation: discrete values {0,1} after thresholding
         """
-        if hasattr(self, 'adj_logits') and 'adj_logits' in self._parameters:
+        if 'adj_logits' in self._parameters:
             # Learnable: reconstruct from upper triangular logits
             connections = torch.sigmoid(self.adj_logits)
             if not self.training:  # Discretize during evaluation
@@ -264,8 +276,9 @@ class Envelope(BuildingComponent):
             return self._reconstruct_symmetric_matrix(connections)
         else:
             # Fixed: return stored matrix directly
-            return self.adj_logits
+            return torch.sigmoid(self.adj_logits)
 
+    @beartype
     def ode_rhs(
             self,
             t: float,  # [s] Current simulation time
@@ -324,6 +337,7 @@ class Envelope(BuildingComponent):
 
         return dT_zones_dt
 
+    @beartype
     def forward(
             self, *,
             t: float,  # [s] Current simulation time
@@ -390,6 +404,7 @@ class Envelope(BuildingComponent):
             "T_zones": solution[-1],
         }
 
+    @beartype
     def adjacency_regularization(self, reg_type: str = 'l1') -> torch.Tensor:
         """
         Regularization loss for the adjacency connections to encourage sparsity.
@@ -400,7 +415,7 @@ class Envelope(BuildingComponent):
         Returns:
             Tensor: Scalar regularization loss.
         """
-        if not (hasattr(self, 'adj_logits') and 'adj_logits' in self._parameters):
+        if 'adj_logits' not in self._parameters:
             return torch.tensor(0., device=self.device)
 
         # Regularize the adjacency connection probabilities (not logits)
@@ -413,7 +428,8 @@ class Envelope(BuildingComponent):
         else:
             raise ValueError("Unknown reg_type. Use 'l1' or 'l2'.")
 
-    def initial_state_functions(self, mode="steady_state"):
+    @beartype
+    def initial_state_functions(self, mode: str = "steady_state"):
         """
         Return functions for sampling intelligent initial states for zone temperatures using context.
 
@@ -426,7 +442,8 @@ class Envelope(BuildingComponent):
             "T_zones": lambda bs: self._sample_T_zones(bs, mode),
         }
 
-    def _sample_T_zones(self, batch_size, mode):
+    @beartype
+    def _sample_T_zones(self, batch_size: int, mode: str):
         """Sample initial zone temperatures based on context."""
         # Use context setpoint if available, otherwise use default comfortable temperature
         T_setpoint = self.context["T_setpoint_base"]
@@ -451,33 +468,27 @@ class Envelope(BuildingComponent):
             dict: Mapping from input variable names to callables (t, batch_size) -> torch.Tensor[batch_size, n_zones].
         """
         if not hasattr(self, '_input_functions'):
-            # Get context values with fallbacks
-            T_outdoor_base = self.context.get("T_outdoor", 288.15)  # Default: 15°C
-            day_of_year = self.context.get("day_of_year", 100)
-            occupancy_state = self.context.get("occupancy_state", "occupied")
-            system_mode = self.context.get("system_mode", "cooling")
 
-            def day_of_year_fn(t):
-                """Context-aware day of year with progression."""
-                # Start from context day and progress with simulation time
-                sim_days = t / 86400.0
-                current_day = (day_of_year + sim_days) % 365
-                if current_day == 0:
-                    current_day = 365
-                return current_day
+            # Get context values, error out if not available
+            req_keys = ['T_outdoor', 'occupancy_state', 'system_mode']
+            assert all(key in self.context for key in req_keys), "Context does not contain required keys!"
+
+            T_outdoor_base = self.context.get("T_outdoor")
+            occupancy_state = self.context.get("occupancy_state")
+            system_mode = self.context.get("system_mode")
 
             def Q_solar_fn(t, batch_size=1):
                 """Context-aware solar heat gain with realistic daily and seasonal patterns."""
-                current_hour = (t / 3600.0) % 24
-                day_of_year = day_of_year_fn(t)
+                h_of_day = simclock.hour_of_day(t)
+                d_of_year = simclock.day_of_year(t)
                 # Daily solar pattern (zero at night, peak at solar noon)
-                if 6 <= current_hour <= 18:  # Daylight hours
-                    daily_solar = torch.sin(torch.tensor(torch.pi * (current_hour - 6) / 12))  # Peak at noon
+                if 6 <= h_of_day <= 18:  # Daylight hours
+                    daily_solar = torch.sin(torch.tensor(torch.pi * (h_of_day - 6) / 12))  # Peak at noon
                 else:
                     daily_solar = torch.tensor(0.0)
 
                 # Seasonal variation (stronger in summer, weaker in winter)
-                seasonal_factor = 1.0 + 0.5 * torch.sin(torch.tensor(2 * torch.pi * (day_of_year - 80) / 365))
+                seasonal_factor = 1.0 + 0.5 * torch.sin(torch.tensor(2 * torch.pi * (d_of_year - 80) / 365))
 
                 # Weather factor from context affects solar intensity
                 weather_factor = self.context.get("weather_factor", 0.7)
@@ -489,13 +500,13 @@ class Envelope(BuildingComponent):
 
             def Q_internal_fn(t, batch_size=1):
                 """Context-aware internal heat gains based on occupancy state and schedule."""
-                current_hour = (t / 3600.0) % 24
+                h_of_day = simclock.hour_of_day(t)
 
                 if occupancy_state == "occupied":
                     # Full occupancy schedule
-                    if 8 <= current_hour <= 17:  # Business hours
+                    if 8 <= h_of_day <= 17:  # Business hours
                         internal_gain = 1200.0  # Full occupancy [W]
-                    elif 7 <= current_hour < 8 or 17 < current_hour <= 19:  # Transition hours
+                    elif 7 <= h_of_day < 8 or 17 < h_of_day <= 19:  # Transition hours
                         internal_gain = 700.0  # Partial occupancy [W]
                     else:
                         internal_gain = 250.0  # Night: minimal loads [W]
@@ -510,8 +521,8 @@ class Envelope(BuildingComponent):
 
             def Q_hvac_fn(t, batch_size=1):
                 """Context-aware HVAC heat input based on system mode and schedule."""
-                day_of_year = day_of_year_fn(t)
-                current_hour = (t / 3600.0) % 24
+                h_of_day = simclock.hour_of_day(t)
+                d_of_year = simclock.day_of_year(t)
 
                 # HVAC operation based on occupancy
                 if occupancy_state == "unoccupied":
@@ -519,7 +530,7 @@ class Envelope(BuildingComponent):
                 elif occupancy_state == "transition":
                     hvac_multiplier = 0.6  # Moderate HVAC during startup
                 else:  # occupied
-                    if 7 <= current_hour <= 19:  # Business hours
+                    if 7 <= h_of_day <= 19:  # Business hours
                         hvac_multiplier = 1.0  # Full HVAC operation
                     else:
                         hvac_multiplier = 0.4  # Reduced HVAC after hours
@@ -537,7 +548,7 @@ class Envelope(BuildingComponent):
                     base_hvac = 0.0  # No HVAC load
 
                 # Seasonal bias for realistic operation
-                seasonal_bias = -400.0 * torch.sin(torch.tensor(2 * torch.pi * (day_of_year - 80) / 365))  # [W]
+                seasonal_bias = -400.0 * torch.sin(torch.tensor(2 * torch.pi * (d_of_year - 80) / 365))  # [W]
 
                 total_hvac = (base_hvac + seasonal_bias) * hvac_multiplier
                 return torch.full((batch_size, self.n_zones), total_hvac,
@@ -548,12 +559,11 @@ class Envelope(BuildingComponent):
                 peak_hour = 14.
                 seasonal_amplitude = 20.0
                 base_temp = T_outdoor_base
-                day_of_year = day_of_year_fn(t)
-                t_hr = t / 3600.0
-                if day_of_year is None:
-                    day_of_year = int((t / 86400) % 365) + 1
-                daily_temp = daily_amplitude * np.sin(2 * np.pi * (t_hr - peak_hour) / 24)
-                seasonal_temp = seasonal_amplitude * np.sin(2 * np.pi * (day_of_year - 80) / 365)
+                d_of_year = simclock.day_of_year(t)
+                h_of_day = simclock.hour_of_day(t)
+
+                daily_temp = daily_amplitude * np.sin(2 * np.pi * (h_of_day - peak_hour) / 24)
+                seasonal_temp = seasonal_amplitude * np.sin(2 * np.pi * (d_of_year - 80) / 365)
                 total_temp = base_temp + daily_temp + seasonal_temp
                 total_temp = torch.full((batch_size, 1), total_temp)
                 return total_temp

@@ -27,7 +27,7 @@ CONTEXT PARAMETERS EXPLAINED:
 
 Environmental Conditions:
 - T_outdoor [K]: Outdoor air temperature - drives envelope heat transfer and economizer operation
-- day_of_year [day]: Day of year (1-365) - determines seasonal solar patterns and weather expectations
+- t_context [sec]: seconds from epoch - determines seasonal solar patterns and weather expectations
 - weather_factor [-]: Sky clarity (0=overcast, 1=clear) - modulates solar radiation and outdoor temperature patterns
 
 Building Operating State:
@@ -60,6 +60,8 @@ This ensures all components generate input functions and initial states that are
 physically consistent and representative of the chosen building operating scenario.
 """
 
+from neuromancer.hvac.simclock import sec_from_date
+
 # =============================================================================
 # DEFAULT CONTEXT - MILD COOLING CONDITIONS
 # =============================================================================
@@ -67,7 +69,7 @@ physically consistent and representative of the chosen building operating scenar
 MILD_COOLING_CONTEXT = {
     # Environmental conditions - Pleasant spring/fall day
     "T_outdoor": 288.15,  # [K] 15°C - Mild outdoor temperature
-    "day_of_year": 100,  # [day] Early April - Shoulder season
+    "t_context": sec_from_date(month=4, day=1, hour=10),  # [sec]
     "weather_factor": 0.7,  # [-] Partly cloudy conditions
 
     # Building operating state - Normal occupied operation
@@ -88,7 +90,7 @@ MILD_COOLING_CONTEXT = {
 NIGHT_SETBACK_CONTEXT = {
     # Environmental conditions - Cool night
     "T_outdoor": 283.15,  # [K] 10°C - Cool nighttime temperature
-    "day_of_year": 100,  # [day] Early April
+    "t_context": sec_from_date(month=4, day=1, hour=22),  # [sec]
     "weather_factor": 0.0,  # [-] No solar radiation
 
     # Building operating state - Energy-saving setback
@@ -109,7 +111,7 @@ NIGHT_SETBACK_CONTEXT = {
 PEAK_COOLING_CONTEXT = {
     # Environmental conditions - Hot summer afternoon
     "T_outdoor": 308.15,  # [K] 35°C - Hot outdoor temperature
-    "day_of_year": 200,  # [day] Mid July - Peak summer
+    "t_context": sec_from_date(month=7, day=21, hour=16),  # [sec] 
     "weather_factor": 1.0,  # [-] Clear sky, maximum solar
 
     # Building operating state - Peak cooling demand
@@ -130,7 +132,7 @@ PEAK_COOLING_CONTEXT = {
 WINTER_HEATING_CONTEXT = {
     # Environmental conditions - Cold winter day
     "T_outdoor": 268.15,  # [K] -5°C - Cold outdoor temperature
-    "day_of_year": 15,  # [day] January - Peak winter
+    "t_context": sec_from_date(month=1, day=21, hour=5),  # [sec] 
     "weather_factor": 0.3,  # [-] Overcast winter conditions
 
     # Building operating state - Heating mode
@@ -151,7 +153,7 @@ WINTER_HEATING_CONTEXT = {
 ECONOMIZER_CONTEXT = {
     # Environmental conditions - Perfect for economizer operation
     "T_outdoor": 285.15,  # [K] 12°C - Cool outdoor air
-    "day_of_year": 80,  # [day] Late March - Spring conditions
+    "t_context": sec_from_date(month=3, day=21, hour=10),  # [sec] 
     "weather_factor": 0.8,  # [-] Mostly clear for solar gains
 
     # Building operating state - Mixed mode operation
@@ -172,7 +174,7 @@ ECONOMIZER_CONTEXT = {
 TRANSITION_CONTEXT = {
     # Environmental conditions - Perfect weather
     "T_outdoor": 291.15,  # [K] 18°C - Very mild outdoor temperature
-    "day_of_year": 120,  # [day] Late April - Ideal spring
+    "t_context": sec_from_date(month=4, day=21, hour=14),  # [sec] 
     "weather_factor": 0.6,  # [-] Partly cloudy
 
     # Building operating state - Minimal conditioning needed
