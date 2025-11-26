@@ -70,34 +70,32 @@ class LpLoss(object):
         return self.rel(x, y)
 
 
-class H1Loss(nn.Module):
+class H1Loss(object):
     def __init__(self, d=2, beta=1.0):
-        super().__init__()
         self.d = d
-        self.beta = beta  # Weight of the derivative term
+        self.beta = beta
         self.l2 = LpLoss(d=d, p=2)
 
-    def forward(self, x, y):
-        # 1. Standard L2 (Value) Error
+    def __call__(self, x, y):
+        # 1. Standard L2 (value) error
         l2_loss = self.l2(x, y)
 
         # 2. Compute Gradients (Central Difference)
         # Assumes shape [Batch, ..., X, Y]
         # We compute dy/dx and dy/dy for both Pred (x) and True (y)
 
-        # Gradient in X direction
+        # 2. Finite forward differences for gradients
         dx_x = x[..., 1:, :] - x[..., :-1, :]
         dx_y = y[..., 1:, :] - y[..., :-1, :]
 
-        # Gradient in Y direction
         dy_x = x[..., :, 1:] - x[..., :, :-1]
         dy_y = y[..., :, 1:] - y[..., :, :-1]
 
-        # 3. Compute L2 error of the gradients
+        # 3. Relative gradient L2 error
         term_x = torch.norm(dx_x - dx_y, p=2) / torch.norm(dx_y, p=2)
         term_y = torch.norm(dy_x - dy_y, p=2) / torch.norm(dy_y, p=2)
 
-        # Combine
+        # 4. Combine
         return l2_loss + self.beta * (term_x + term_y)
 
 
