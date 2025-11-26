@@ -3,9 +3,7 @@ Operators and neural operator wrappers.
 """
 
 from neuralop.models import FNO as _BaseFNO
-import numpy as np
 import torch
-import torch.nn as nn
 
 
 class FNOWithoutMeta(_BaseFNO):
@@ -30,6 +28,21 @@ class FNO(FNOWithoutMeta):
 
 
 class LpLoss(object):
+    """
+    Lp loss class, for computing relative or absolute Lp losses
+    over spatial dimensions d.
+    Args:
+        d (int): spatial dimensions
+        p (int): Lp norm type
+        size_average (bool): if true, average over batch
+        reduction (bool): if true, reduce over batch
+    Usage:
+        loss = LpLoss(d=2, p=2)
+        abs_loss = loss.abs(x, y)
+        rel_loss = loss.rel(x, y)
+        Default is relative Lp loss: loss(x, y)
+    """
+
     def __init__(self, d=2, p=2, size_average=True, reduction=True):
         super(LpLoss, self).__init__()
         # Dimension and Lp-norm type are positive
@@ -71,6 +84,26 @@ class LpLoss(object):
 
 
 class H1Loss(object):
+    """
+    H1 loss class for computing H1 losses over spatial dimensions d.
+    Args:
+        d (int): spatial dimensions
+        beta (float): weight for gradient term
+    Usage:
+        loss = H1Loss(d=2, beta=1.0)
+        h1_loss = loss(x, y)
+    1. Standard L2 (value) error
+    2. Finite forward differences for gradients
+    3. Relative gradient L2 error
+    4. Combine
+    --------------------------------------------------------------------------
+    1. Standard L2 (value) error
+        L2_loss = ||x - y||_2
+    2. Finite forward differences for gradients
+        dx_x = x[..., 1:, :] - x[..., :-1, :]
+        dx_y = y[..., 1:, :] - y[..., :-1, :]
+    """
+
     def __init__(self, d=2, beta=1.0):
         self.d = d
         self.beta = beta
