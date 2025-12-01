@@ -6,10 +6,11 @@ from neuralop.models import FNO as _BaseFNO
 import torch
 
 
-class FNOWithoutMeta(_BaseFNO):
+class FNO(_BaseFNO):
     """
-    Subclass of neuralop FNO that strips ``_metadata`` from checkpoints for
-    compatibility across PyTorch versions.
+    Wrapper around neuralop.models.FNO that strips ``_metadata`` from
+    checkpoints for compatibility across PyTorch versions
+    \\To Do: Check whether this is needed with all available NOs in the neuralop.models
     """
 
     def state_dict(self, *args, **kwargs):
@@ -18,13 +19,10 @@ class FNOWithoutMeta(_BaseFNO):
         return state
 
     def load_state_dict(self, state, **kwargs):
+        # Copy to avoid mutating the caller's dict in-place
         state = dict(state)
         state.pop("_metadata", None)
         return super().load_state_dict(state, **kwargs)
-
-
-class FNO(FNOWithoutMeta):
-    """Default FNO export with metadata removal applied."""
 
 
 class LpLoss(object):
@@ -132,4 +130,4 @@ class H1Loss(object):
         return l2_loss + self.beta * (term_x + term_y)
 
 
-__all__ = ["FNO", "FNOWithoutMeta", "LpLoss", "H1Loss"]
+__all__ = ["FNO", "LpLoss", "H1Loss"]
