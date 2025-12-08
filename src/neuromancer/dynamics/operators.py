@@ -23,19 +23,22 @@ class DeepONetCartesianProd(nn.Module):
     p = latent interaction dimension (for e.g MLP output)
     dim_x = input dimension for trunk net
 
-    Accepts (leading index should be same for Neuromancer inputs):
-        branch_input: (m, B)
-        trunk_input:  (m, dim_x)
+    Accepts (leading index should be same for Neuromancer inputs,
+    so we keep it batch first by PyTorch convention):
+        branch_input: (B, m)
+        trunk_input:  (B, m, dim_x)  # repeated grid for each sample
+        output:       (B, m)  or (m, B) if return_transposed=True
 
     Internally converts:
-        branch_input -> (B, m) - PyTorch default batch first
+        trunk_input -> (m, dim_x) - assumes all B identical (shared grid)
 
-    Uses Neuromancer Blocks, MLPs:
+    Uses Neuromancer Blocks, typically MLPs:
         - branch_net: maps (B, m) -> (B, p)
         - trunk_net:  maps (m, dim_x) -> (m, p)
+
     Output:
-    return_transposed=True → return output in the same format as input (m,B)
     return_transposed=False → return (B,m) - PyTorch default batch first
+    return_transposed=True → return (m,B) - output sensor first
     """
 
     def __init__(
@@ -43,7 +46,7 @@ class DeepONetCartesianProd(nn.Module):
         branch_net: nn.Module,
         trunk_net: nn.Module,
         bias: bool = True,
-        return_transposed: bool = True,
+        return_transposed: bool = False,
     ) -> None:
         super().__init__()
         self.branch_net = branch_net
@@ -54,8 +57,8 @@ class DeepONetCartesianProd(nn.Module):
 
     def forward(self, branch_input, trunk_input):
         """
-        branch_input: (m, B)
-        trunk_input:  (m, dim_x)
+        branch_input: (B, m)
+        trunk_input:  (B, m, dim_x) # repeated grid for each sample
 
         branch_output: (B, p)
         trunk_output:  (m, p)
@@ -63,17 +66,20 @@ class DeepONetCartesianProd(nn.Module):
         fused output:  (B, m)
         """
 
-        # Convert to batch-first for PyTorch MLPs
-        branch_input_internal = branch_input.transpose(0, 1)  # (B,m)
+        # # Convert to batch-first for PyTorch MLPs
+        B, m = branch_input.shape
 
         # Pass through MLPs
-        b = self.branch_net(branch_input_internal)  # (B, p)
-        t = self.trunk_net(trunk_input)  # (m, p)
+        b = self.branch_net(branch_input)  # (B, p)
+        # Trunk MLP: extract the shared grid from the first sample
+        # trunk_input[0]: (m, dim_x)
+        t = self.trunk_net(trunk_input[0])  # (m, p)
 
         # Cartesian-product fusion:
         #   For each batch function (B) and each trunk location (m):
         #       dot(b[b,:], t[m,:])
         out = torch.einsum("bp,mp->bm", b, t)
+        # \\ To do: Changes for multiple input branch / trunk nets?
 
         # Add bias if needed
         if self.bias is not None:
