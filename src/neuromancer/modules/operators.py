@@ -247,4 +247,64 @@ class DeepXDEDataWrapper(nn.Module):
         return self.model((branch_inputs, trunk_inputs))
 
 
-__all__ = ["FNO", "LpLoss", "H1Loss", "DeepONetCartesianProd", "DeepXDEDataWrapper"]
+class DeepONetBatchWrapper(nn.Module):
+    """
+    Adapter for DeepONet-style models that keeps the default DictDataset/DataLoader collate.
+
+    Call modes:
+      1) forward(batch_dict): expects keys
+         - branch_inputs: (B, m)
+         - trunk_inputs:  (B, dim_x) or (B, m, dim_x); if 3D we assume a shared grid and take trunk_inputs[0]
+         - outputs:       (B, 1) [optional]
+      2) forward(branch, trunk, targets=None): positional tensors, targets optional
+
+    Returns:
+      - preds if no targets are provided
+      - (preds, targets) if targets are present
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        branch_key: str = "branch_inputs",
+        trunk_key: str = "trunk_inputs",
+        output_key: str = "outputs",
+    ) -> None:
+        super().__init__()
+        self.model = model
+        self.branch_key = branch_key
+        self.trunk_key = trunk_key
+        self.output_key = output_key
+
+    def forward(self, *args, **kwargs):
+        # Case 1: single dict batch
+        if len(args) == 1 and isinstance(args[0], dict):
+            batch = args[0]
+            branch = batch[self.branch_key]
+            trunk = batch[self.trunk_key]
+            targets = batch.get(self.output_key)
+        # Case 2: branch, trunk passed separately
+        elif len(args) == 2:
+            branch, trunk = args
+            targets = kwargs.get("targets")
+        else:
+            raise TypeError(
+                "Expected forward(batch_dict) or forward(branch, trunk); "
+                f"got {len(args)} positional args."
+            )
+
+        if trunk.dim() == 3:  # (B, m, dim_x) → shared grid
+            trunk = trunk[0]
+
+        preds = self.model((branch, trunk))
+        return (preds, targets) if targets is not None else preds
+
+
+__all__ = [
+    "FNO",
+    "LpLoss",
+    "H1Loss",
+    "DeepONetCartesianProd",
+    "DeepXDEDataWrapper",
+    "DeepONetBatchWrapper",
+]
