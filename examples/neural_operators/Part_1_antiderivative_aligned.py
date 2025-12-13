@@ -1,7 +1,7 @@
 """
 Standalone Python script equivalent to Part_1_antiderivative_aligned.ipynb.
 
-Mirrors the notebook workflow end-to-end, including plotting and training.
+Mirrors the notebook workflow end-to-end, using both Neuromancer and DeepXDE DeepONets with plotting and training.
 """
 
 # %pip install "neuromancer[examples] @ git+https://github.com/pnnl/neuromancer.git@master"
@@ -12,24 +12,24 @@ import sys
 import time
 from pathlib import Path
 
+os.environ["DDE_BACKEND"] = "pytorch"
+
 # For GUI windows instead of saved images, set an interactive backend before importing pyplot:
 # import matplotlib; matplotlib.use("TkAgg")
 import deepxde as dde
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from IPython.display import clear_output
 from torch import nn
 
 # Enable local neuromancer source when running from the repository root
 repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root / "src"))
 
-from neuromancer.callbacks import Callback
+from neuromancer.callbacks import LossHistoryCallback
 from neuromancer.dataset import DictDataset
-from neuromancer.modules.activations import activations
 from neuromancer.modules.blocks import MLP
-from neuromancer.modules.operators import DeepONetCartesianProd
+from neuromancer.modules.operators import DeepONetCartesianProd, DeepXDEDataWrapper
 from neuromancer.system import Node
 from neuromancer.problem import Problem
 from neuromancer.constraint import variable
@@ -79,55 +79,28 @@ def prepare_data(dataset, name):
     Returns:
         data (DictDataset): Neuromancer DictDataset with branch and trunk inputs and outputs.
     """
-    branch_inputs = dataset["X"][0]  # (Nsamples, m)
-    sensors_local = dataset["X"][1]  # (m, 1)
-    outputs = dataset["y"]  # (Nsamples, m)
-    trunk_inputs = np.repeat(
-        sensors_local[None, ...], branch_inputs.shape[0], axis=0
-    )  # (Nsamples, m, 1)
+    branch_inputs = torch.as_tensor(dataset["X"][0], dtype=torch.float32)  # (N, m)
+    sensors_local = torch.as_tensor(dataset["X"][1], dtype=torch.float32)  # (m, 1)
+    outputs = torch.as_tensor(dataset["y"], dtype=torch.float32)  # (N, m)
 
-    t_branch_inputs = torch.from_numpy(branch_inputs).float()
-    t_trunk_inputs = torch.from_numpy(trunk_inputs).float()
-    t_outputs = torch.from_numpy(outputs).float()
+    # share the same grid for each batch entry without copying
+    trunk_inputs = sensors_local.expand(branch_inputs.shape[0], -1, -1)
+
+    print(
+        f"{name} dataset: samples = {branch_inputs.shape[0]}, m = {branch_inputs.shape[1]}"
+    )
 
     return DictDataset(
         {
-            "branch_inputs": t_branch_inputs,
-            "trunk_inputs": t_trunk_inputs,
-            "outputs": t_outputs,
+            "branch_inputs": branch_inputs,
+            "trunk_inputs": trunk_inputs,
+            "outputs": outputs,
         },
         name=name,
     )
 
 
-class LossHistoryCallback(Callback):
-    """
-    Callback to record and plot training and dev loss history.
-    Plots loss history at the end of each epoch.
-
-    Args:
-    Callback (neuromancer.callbacks.Callback): Base callback class.
-    """
-
-    def end_epoch(self, trainer, output):
-        if trainer.current_epoch % trainer.epoch_verbose == 0:
-            train_loss_history = [
-                l.detach().cpu().numpy() for l in trainer.loss_history["train"]
-            ]
-            dev_loss_history = [
-                l.detach().cpu().numpy() for l in trainer.loss_history["dev"]
-            ]
-            clear_output(wait=True)
-            plt.semilogy(train_loss_history, label="Train loss")
-            plt.semilogy(dev_loss_history, label="Dev loss")
-            plt.xlabel("# Epochs")
-            plt.legend()
-            save_fig(f"loss_history_epoch_{trainer.current_epoch}.png")
-
-
 def main():
-    os.environ["DDE_BACKEND"] = "pytorch"
-
     # Random seeds
     torch.manual_seed(1234)
     np.random.seed(1234)
@@ -267,33 +240,52 @@ def main():
     )
     print(node_deeponet)
 
+    # DeepONet from DeepXDE wrapped for Neuromancer DictDataset
+    dde_deeponet = dde.nn.DeepONetCartesianProd(
+        [m, 40, 40],
+        [dim_x, 40, 40],
+        "relu",
+        "Glorot normal",
+    )
+    dde_deeponet_wrapped = DeepXDEDataWrapper(dde_deeponet)
+    node_dde_deeponet = Node(
+        dde_deeponet_wrapped,
+        ["branch_inputs", "trunk_inputs"],
+        ["g"],
+        name="dde_deeponet",
+    )
+    print(node_dde_deeponet)
+
     var_y_est = variable("g")
     var_y_true = variable("outputs")
 
-    nodes = [node_deeponet]
     var_loss = (var_y_est == var_y_true) ^ 2
     var_loss.name = "residual_loss"
     objectives = [var_loss]
 
     loss = PenaltyLoss(objectives, constraints=[])
 
-    problem = Problem(nodes, loss=loss, grad_inference=True)
+    problem = Problem(nodes=[node_deeponet], loss=loss, grad_inference=True)
     problem.show()
+    problem_dde = Problem(nodes=[node_dde_deeponet], loss=loss, grad_inference=True)
+    problem_dde.show()
 
     lr = 0.001  # step size for gradient descent
     epochs = 10000  # number of training epochs
     epoch_verbose = (
-        100  # print loss/display loss plot when this many epochs have occurred
+        10  # print loss/display loss plot when this many epochs have occurred
     )
     warmup = 100  # number of epochs to wait before enacting early stopping policy
     patience = 0  # number of epochs with no improvement in eval metric to allow before early stopping
 
     # -------------------------------------------------------------------------
-    # Trainer setup
+    # Trainer setup (Neuromancer DeepONet)
     # -------------------------------------------------------------------------
     optimizer = torch.optim.AdamW(problem.parameters(), lr=lr)
 
-    loss_history_callback = LossHistoryCallback()
+    loss_history_callback = LossHistoryCallback(
+        plots_dir=PLOTS_DIR / "neuromancer", show=False
+    )
 
     trainer = Trainer(
         problem.to(device),
@@ -327,25 +319,80 @@ def main():
     ]
     dev_loss_history = [l.detach().cpu().numpy() for l in trainer.loss_history["dev"]]
     mean_test_loss = best_outputs["mean_test_loss"].detach().cpu().numpy()
-    print(mean_test_loss)
+    print(f"Neuromancer mean test loss: {mean_test_loss}")
     print(f"len(train_loss_history): {len(train_loss_history)}")
     print(f"len(dev_loss_history): {len(dev_loss_history)}")
 
     # -------------------------------------------------------------------------
     # Plot training history
     # -------------------------------------------------------------------------
-    plt.semilogy(train_loss_history, label="Train loss")
-    plt.semilogy(dev_loss_history, label="Dev loss")
+    plt.semilogy(train_loss_history, label="Train loss (Neuromancer)")
+    plt.semilogy(dev_loss_history, label="Dev loss (Neuromancer)")
     plt.scatter(
         len(train_loss_history),
         mean_test_loss,
-        label="Mean test loss",
+        label="Mean test loss (Neuromancer)",
         c="red",
         marker="x",
     )
     plt.xlabel("# Epochs")
     plt.legend()
-    save_fig("training_history.png")
+    save_fig("training_history_neuromancer.png")
+
+    # -------------------------------------------------------------------------
+    # DeepXDE DeepONet training and comparison
+    # -------------------------------------------------------------------------
+    optimizer_dde = torch.optim.AdamW(problem_dde.parameters(), lr=lr)
+    loss_history_callback_dde = LossHistoryCallback(
+        plots_dir=PLOTS_DIR / "deepxde", show=False
+    )
+
+    trainer_dde = Trainer(
+        problem_dde.to(device),
+        train_data=train_loader,
+        dev_data=dev_loader,
+        test_data=test_loader,
+        optimizer=optimizer_dde,
+        logger=None,
+        callback=loss_history_callback_dde,
+        epochs=epochs,
+        patience=patience,
+        epoch_verbose=epoch_verbose,
+        train_metric="train_loss",
+        dev_metric="dev_loss",
+        test_metric="test_loss",
+        eval_metric="dev_loss",
+        warmup=warmup,
+        device=device,
+    )
+
+    best_model_dde = trainer_dde.train()
+    best_outputs_dde = trainer_dde.test(best_model_dde)
+    problem_dde.load_state_dict(best_model_dde)
+
+    train_loss_history_dde = [
+        l.detach().cpu().numpy() for l in trainer_dde.loss_history["train"]
+    ]
+    dev_loss_history_dde = [
+        l.detach().cpu().numpy() for l in trainer_dde.loss_history["dev"]
+    ]
+    mean_test_loss_dde = best_outputs_dde["mean_test_loss"].detach().cpu().numpy()
+    print(f"DeepXDE mean test loss: {mean_test_loss_dde}")
+
+    plt.semilogy(train_loss_history, label="Train loss (Neuromancer)")
+    plt.semilogy(dev_loss_history, label="Dev loss (Neuromancer)")
+    plt.semilogy(train_loss_history_dde, label="Train loss (DeepXDE)")
+    plt.semilogy(dev_loss_history_dde, label="Dev loss (DeepXDE)")
+    plt.scatter(
+        len(train_loss_history_dde),
+        mean_test_loss_dde,
+        label="Mean test loss (DeepXDE)",
+        c="orange",
+        marker="x",
+    )
+    plt.xlabel("# Epochs")
+    plt.legend()
+    save_fig("training_history_comparison.png")
 
     # -------------------------------------------------------------------------
     # Evaluation examples
@@ -400,6 +447,33 @@ def main():
     plt.plot(grid_np, u_est.detach().cpu().numpy(), label="integral estimated")
     plt.legend()
     save_fig("eval_cos.png")
+
+    # Compare Neuromancer and DeepXDE models on one test sample
+    k_compare = 211
+    v_compare = test_datadict.datadict["branch_inputs"][k_compare : k_compare + 1].to(
+        device
+    )
+    x_compare = test_datadict.datadict["trunk_inputs"][k_compare : k_compare + 1].to(
+        device
+    )
+    res_base = problem.predict({"branch_inputs": v_compare, "trunk_inputs": x_compare})
+    res_dde = problem_dde.predict(
+        {"branch_inputs": v_compare, "trunk_inputs": x_compare}
+    )
+
+    u_true_compare = test_datadict.datadict["outputs"][k_compare].to(device)
+    u_est_base = res_base["g"][0]
+    u_est_dde = res_dde["g"][0]
+    grid_compare = x_compare[0, :, 0].detach().cpu().numpy()
+
+    plt.plot(grid_compare, v_compare[0].detach().cpu().numpy(), label="v_")
+    plt.plot(grid_compare, u_true_compare.detach().cpu().numpy(), label="u_true")
+    plt.plot(
+        grid_compare, u_est_base.detach().cpu().numpy(), label="u_est (Neuromancer)"
+    )
+    plt.plot(grid_compare, u_est_dde.detach().cpu().numpy(), label="u_est (DeepXDE)")
+    plt.legend()
+    save_fig("eval_compare_neuromancer_vs_deepxde.png")
 
 
 if __name__ == "__main__":
