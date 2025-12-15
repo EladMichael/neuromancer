@@ -214,7 +214,7 @@ class DeepONetCartesianProd(nn.Module):
 class DeepXDEDataWrapper(nn.Module):
     """
     Adapter that makes DeepXDE models compatible with NeuroMANCER Nodes.
-
+    Tested with dde.nn.DeepONetCartesianProd
     DeepXDE expects a single tuple/list input (branch_inputs, trunk_inputs)
 
     B = Batch size or NSamples
@@ -249,18 +249,16 @@ class DeepXDEDataWrapper(nn.Module):
 
 class DeepONetBatchWrapper(nn.Module):
     """
-    Adapter for DeepONet-style models that keeps the default DictDataset/DataLoader collate.
+    Minimal adapter for dde.nn.DeepONet with per-sample trunk inputs.
 
-    Call modes:
-      1) forward(batch_dict): expects keys
-         - branch_inputs: (B, m)
-         - trunk_inputs:  (B, dim_x) or (B, m, dim_x); if 3D we assume a shared grid and take trunk_inputs[0]
-         - outputs:       (B, 1) [optional]
-      2) forward(branch, trunk, targets=None): positional tensors, targets optional
+    Expects:
+      branch_inputs: (B, m)
+      trunk_inputs:  (B, dim_x)
+      outputs:       (B, dim_x) [optional]
 
-    Returns:
-      - preds if no targets are provided
-      - (preds, targets) if targets are present
+    Simply forwards the tuple (branch_inputs, trunk_inputs) to DeepONet and,
+    if targets are provided, returns (preds, targets) to preserve the usual
+    Neuromancer training flow.
     """
 
     def __init__(
@@ -293,10 +291,108 @@ class DeepONetBatchWrapper(nn.Module):
                 f"got {len(args)} positional args."
             )
 
-        if trunk.dim() == 3:  # (B, m, dim_x) → shared grid
-            trunk = trunk[0]
+        if trunk.dim() != 2:
+            raise ValueError("trunk_inputs must have shape (B, dim_x)")
 
         preds = self.model((branch, trunk))
+        return (preds, targets) if targets is not None else preds
+
+
+class DeepXDEWrapper(nn.Module):
+    """
+    Wrapper for DeepONet-style models in DeepXDE.
+
+    The user must specify whether the wrapped model uses
+    Cartesian-product (shared-grid) dde.nn.DeepONetCartesianProd or
+    pointwise (per-sample) dde.nn.DeepONet.
+
+    Parameters
+    ----------
+    model : nn.Module
+        DeepONet-style model from DeepXDE that expects inputs
+        as (branch_inputs, trunk_inputs).
+
+    B = Batch size or NSamples
+    m = number of sensors / trunk locations
+    p = latent interaction dimension (for e.g MLP output)
+    dim_x = input dimension for trunk net
+
+    is_cartesian : bool
+        If True:
+            - Model is assumed to be a Cartesian-product DeepONet
+            - Trunk inputs represent a shared grid
+            - Accepted trunk shapes:
+                * (m, dim_x)
+                * (B, m, dim_x)  -> first batch element is used
+        If False:
+            - Model is assumed to be a basic (pointwise) DeepONet
+            - Trunk inputs are per-sample
+            - Required trunk shape:
+                * (B, dim_x)
+
+    branch_key, trunk_key, output_key : str
+        Keys used when calling forward(batch_dict).
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        is_cartesian: bool,
+        branch_key: str = "branch_inputs",
+        trunk_key: str = "trunk_inputs",
+        output_key: str = "outputs",
+    ) -> None:
+        super().__init__()
+        self.model = model
+        self.is_cartesian = is_cartesian
+        self.branch_key = branch_key
+        self.trunk_key = trunk_key
+        self.output_key = output_key
+
+    def _normalize_trunk(self, trunk: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize trunk input according to is_cartesian flag.
+        """
+        if self.is_cartesian:
+            # Shared-grid (Cartesian-product) DeepONet
+            if trunk.dim() == 3:
+                # (B, m, dim_x) -> shared grid
+                return trunk[0]
+            elif trunk.dim() == 2:
+                # (m, dim_x)
+                return trunk
+            else:
+                raise ValueError(
+                    "Cartesian DeepONet expects trunk_inputs of shape "
+                    "(m, dim_x) or (B, m, dim_x)."
+                )
+        else:
+            # Pointwise DeepONet
+            if trunk.dim() != 2:
+                raise ValueError(
+                    "Pointwise DeepONet expects trunk_inputs of shape (B, dim_x)."
+                )
+            return trunk
+
+    def forward(self, *args, **kwargs):
+        # Case 1: dict batch
+        if len(args) == 1 and isinstance(args[0], dict):
+            batch = args[0]
+            branch = batch[self.branch_key]
+            trunk = batch[self.trunk_key]
+            targets = batch.get(self.output_key)
+
+        # Case 2: positional tensors
+        elif len(args) >= 2:
+            branch, trunk = args[:2]
+            targets = kwargs.get("targets")
+
+        else:
+            raise TypeError("Expected forward(batch_dict) or forward(branch, trunk).")
+
+        trunk = self._normalize_trunk(trunk)
+        preds = self.model((branch, trunk))
+
         return (preds, targets) if targets is not None else preds
 
 
@@ -305,6 +401,7 @@ __all__ = [
     "LpLoss",
     "H1Loss",
     "DeepONetCartesianProd",
-    "DeepXDEDataWrapper",
-    "DeepONetBatchWrapper",
+    # "DeepXDEDataWrapper",
+    # "DeepONetBatchWrapper",
+    "DeepXDEWrapper",
 ]
