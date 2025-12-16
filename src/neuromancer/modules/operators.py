@@ -211,93 +211,6 @@ class DeepONetCartesianProd(nn.Module):
             return out  # (B,m)
 
 
-class DeepXDEDataWrapper(nn.Module):
-    """
-    Adapter that makes DeepXDE models compatible with NeuroMANCER Nodes.
-    Tested with dde.nn.DeepONetCartesianProd
-    DeepXDE expects a single tuple/list input (branch_inputs, trunk_inputs)
-
-    B = Batch size or NSamples
-    m = number of sensors / trunk locations
-    p = latent interaction dimension (for e.g MLP output)
-    dim_x = input dimension for trunk net
-
-    Step1: Convert trunk input from (B, m, dim_x) to (m, dim_x)
-    assuming all B identical (shared grid). 2D case is for error handling.
-    Step2: Create the Tuple input (branch_inputs, trunk_inputs) where
-           branch_inputs = (batch, m)
-           trunk_inputs = (m, dim_x)
-    Step3: Call the Neuromancer model with the tuple input
-    """
-
-    def __init__(self, model: nn.Module) -> None:
-        super().__init__()
-        self.model = model
-
-    def forward(
-        self, branch_inputs: torch.Tensor, trunk_inputs: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        :param branch_inputs: Tensor shaped (batch, m)
-        :param trunk_inputs: Tensor shaped (m, dim_x) or (batch, m, dim_x)
-                             with identical grids
-        """
-        if trunk_inputs.dim() == 3:
-            trunk_inputs = trunk_inputs[0]
-        return self.model((branch_inputs, trunk_inputs))
-
-
-class DeepONetBatchWrapper(nn.Module):
-    """
-    Minimal adapter for dde.nn.DeepONet with per-sample trunk inputs.
-
-    Expects:
-      branch_inputs: (B, m)
-      trunk_inputs:  (B, dim_x)
-      outputs:       (B, dim_x) [optional]
-
-    Simply forwards the tuple (branch_inputs, trunk_inputs) to DeepONet and,
-    if targets are provided, returns (preds, targets) to preserve the usual
-    Neuromancer training flow.
-    """
-
-    def __init__(
-        self,
-        model: nn.Module,
-        branch_key: str = "branch_inputs",
-        trunk_key: str = "trunk_inputs",
-        output_key: str = "outputs",
-    ) -> None:
-        super().__init__()
-        self.model = model
-        self.branch_key = branch_key
-        self.trunk_key = trunk_key
-        self.output_key = output_key
-
-    def forward(self, *args, **kwargs):
-        # Case 1: single dict batch
-        if len(args) == 1 and isinstance(args[0], dict):
-            batch = args[0]
-            branch = batch[self.branch_key]
-            trunk = batch[self.trunk_key]
-            targets = batch.get(self.output_key)
-        # Case 2: branch, trunk passed separately
-        elif len(args) == 2:
-            branch, trunk = args
-            targets = kwargs.get("targets")
-        else:
-            raise TypeError(
-                "Expected forward(batch_dict) or forward(branch, trunk); "
-                f"got {len(args)} positional args."
-            )
-
-        if trunk.dim() != 2:
-            raise ValueError("trunk_inputs must have shape (B, dim_x)")
-
-        preds = self.model((branch, trunk))
-        return (preds, targets) if targets is not None else preds
-
-
 class DeepXDEWrapper(nn.Module):
     """
     Wrapper for DeepONet-style models in DeepXDE.
@@ -401,7 +314,5 @@ __all__ = [
     "LpLoss",
     "H1Loss",
     "DeepONetCartesianProd",
-    # "DeepXDEDataWrapper",
-    # "DeepONetBatchWrapper",
     "DeepXDEWrapper",
 ]
