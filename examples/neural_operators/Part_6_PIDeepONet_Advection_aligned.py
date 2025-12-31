@@ -198,11 +198,26 @@ def main():
         },
         name="test",
     )
+    dev_size = 20
+    dev_idx = torch.arange(dev_size)
+    test_idx = torch.arange(dev_size, len(test_datadict))
+
+    dev_datadict = DictDataset(
+        {k: v[dev_idx] for k, v in test_datadict.datadict.items()},
+        name="dev",
+    )
+    test_datadict = DictDataset(
+        {k: v[test_idx] for k, v in test_datadict.datadict.items()},
+        name="test",
+    )
 
     print("Dimensions check:")
     print("Train branch:", train_datadict.datadict["branch_inputs"].shape)
     print("Train output:", train_datadict.datadict["outputs"].shape)
     print("Train trunk:", train_datadict.datadict["trunk_inputs"].shape)
+    print("Dev branch:", dev_datadict.datadict["branch_inputs"].shape)
+    print("Dev output:", dev_datadict.datadict["outputs"].shape)
+    print("Dev trunk:", dev_datadict.datadict["trunk_inputs"].shape)
     print("Test branch:", test_datadict.datadict["branch_inputs"].shape)
     print("Test output:", test_datadict.datadict["outputs"].shape)
     print("Test trunk:", test_datadict.datadict["trunk_inputs"].shape)
@@ -213,6 +228,13 @@ def main():
         train_datadict,
         batch_size=batch_size,
         collate_fn=train_datadict.collate_fn,
+        shuffle=False,
+    )
+
+    dev_loader = torch.utils.data.DataLoader(
+        dev_datadict,
+        batch_size=batch_size,
+        collate_fn=dev_datadict.collate_fn,
         shuffle=False,
     )
 
@@ -288,17 +310,17 @@ def main():
     # Training
     # -------------------------------------------------------------------------
     lr = 0.0005
-    epochs = 1000
+    epochs = 2000
     epoch_verbose = 10
-    warmup = 100
-    patience = 0
+    warmup = 0
+    patience = epochs
 
     optimizer = torch.optim.Adam(problem.parameters(), lr=lr)
 
     trainer = Trainer(
         problem.to(device),
         train_data=train_loader,
-        dev_data=train_loader,
+        dev_data=dev_loader,
         test_data=test_loader,
         optimizer=optimizer,
         logger=None,
@@ -306,9 +328,9 @@ def main():
         patience=patience,
         epoch_verbose=epoch_verbose,
         train_metric="train_loss",
-        dev_metric="train_loss",
+        dev_metric="dev_loss",
         test_metric="test_loss",
-        eval_metric="train_loss",
+        eval_metric="mean_train_loss",
         warmup=warmup,
         device=device,
     )
@@ -324,10 +346,13 @@ def main():
         l.detach().cpu().numpy() for l in trainer.loss_history["train"]
     ]
     print(f"len(train_loss_history): {len(train_loss_history)}")
+    dev_loss_history = [l.detach().cpu().numpy() for l in trainer.loss_history["dev"]]
+    print(f"len(dev_loss_history): {len(dev_loss_history)}")
     mean_test_loss = best_outputs["mean_test_loss"].detach().cpu().numpy()
     print(mean_test_loss)
 
     plt.semilogy(train_loss_history, label="Train loss")
+    plt.semilogy(dev_loss_history, label="Dev loss")
     plt.scatter(
         len(train_loss_history),
         mean_test_loss,
@@ -359,23 +384,41 @@ def main():
         res = problem.predict({"branch_inputs": v, "trunk_inputs": xt})
     u_pred = res["g"][0].detach().cpu().numpy().reshape(len(t), len(x))
 
+    error = np.abs(u_true - u_pred)
+    rel_l2 = np.linalg.norm(u_true - u_pred) / np.linalg.norm(u_true)
+    print(f"Relative L2 error: {rel_l2:.4e}")
+
     vmin = min(u_true.min(), u_pred.min())
     vmax = max(u_true.max(), u_pred.max())
-    plt.figure()
-    plt.imshow(u_true, origin="lower", aspect="auto", vmin=vmin, vmax=vmax)
-    plt.colorbar()
-    plt.title("u_true")
-    save_fig("pideponet_u_true.png")
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    plot_params = {
+        "origin": "lower",
+        "aspect": "auto",
+        "vmin": vmin,
+        "vmax": vmax,
+        "extent": [0, 1, 0, 1],
+    }
 
-    plt.figure()
-    plt.imshow(u_pred, origin="lower", aspect="auto", vmin=vmin, vmax=vmax)
-    plt.colorbar()
-    plt.title("u_pred")
-    save_fig("pideponet_u_pred.png")
+    im1 = axes[0].imshow(u_true, **plot_params)
+    axes[0].set_title("Analytic Solution u_true")
+    axes[0].set_xlabel("x")
+    axes[0].set_ylabel("t")
+    fig.colorbar(im1, ax=axes[0])
 
-    rel_l2 = np.linalg.norm(u_true - u_pred) / np.linalg.norm(u_true)
-    print(f"rel_l2: {rel_l2:.4e}")
-    print(dde.metrics.l2_relative_error(u_true, u_pred))
+    im2 = axes[1].imshow(u_pred, **plot_params)
+    axes[1].set_title(f"DeepONet Prediction u_pred - L2 error {rel_l2:.4e}")
+    axes[1].set_xlabel("x")
+    fig.colorbar(im2, ax=axes[1])
+
+    im3 = axes[2].imshow(
+        error, origin="lower", aspect="auto", cmap="magma", extent=[0, 1, 0, 1]
+    )
+    axes[2].set_title("Absolute Error")
+    axes[2].set_xlabel("x")
+    fig.colorbar(im3, ax=axes[2])
+
+    plt.tight_layout()
+    save_fig("pideponet_solution_comparison.png")
 
 
 if __name__ == "__main__":
