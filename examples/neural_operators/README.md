@@ -13,9 +13,9 @@ showcasing operator learning capabilities in Neuromancer
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> Part 4: FNO - Darcy Flow.
 + <a target="_blank" href="https://colab.research.google.com/github/pnnl/neuromancer/blob/master/examples/neural_operators/Part_5_FNO_DiffusionEquation.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> Part 5: FNO - Diffusion Equation.
-<!-- + <a target="_blank" href="https://colab.research.google.com/github/pnnl/neuromancer/blob/master/examples/neural_operators/Part_6_DeepONet_DarcyFlow.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> Part 6: DeepONet - Darcy Flow.
-+ <a target="_blank" href="https://colab.research.google.com/github/pnnl/neuromancer/blob/master/examples/neural_operators/Part_6_DeepONet_DiffusionEquation.ipynb">
++ <a target="_blank" href="https://colab.research.google.com/github/pnnl/neuromancer/blob/master/examples/neural_operators/Part_6_PIDeepONet_Advection_aligned.ipynb">
+  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> Part 6: PIDeepONet - 1D Advection equation.
+<!-- + <a target="_blank" href="https://colab.research.google.com/github/pnnl/neuromancer/blob/master/examples/neural_operators/Part_6_DeepONet_DiffusionEquation.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> Part 6: DeepONet - Diffusion Equation.
 + <a target="_blank" href="https://colab.research.google.com/github/pnnl/neuromancer/blob/master/examples/neural_operators/Part_6_DeepONetCartesianProd_DarcyFlow.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a> Part 6: DeepONet Cartesian Prod - Darcy Flow.
