@@ -1,5 +1,5 @@
 """
-Standalone Python script equivalent to Part_8_SFNO_ShallowWater.ipynb.
+Standalone Python script equivalent to Part_7_SFNO_ShallowWater.ipynb.
 
 Mirrors the notebook workflow end-to-end, including plotting and training.
 """
