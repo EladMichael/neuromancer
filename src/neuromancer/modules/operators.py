@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import torch
-from neuralop.models import FNO as _BaseFNO
+from neuralop.models import (
+    FNO as _BaseFNO,
+    SFNO as _BaseSFNO,
+    TFNO as _BaseTFNO,
+    GINO as _BaseGINO,
+    UNO as _BaseUNO,
+)
 from torch import nn
 
 
-class FNO(_BaseFNO):
-    """
-    Wrapper around neuralop.models.FNO that strips ``_metadata`` from
-    checkpoints for compatibility across PyTorch versions
-    \\To Do: Check whether this is needed with all available NOs in the neuralop.models
-    """
-
+class _StripMetadataMixin:
     def state_dict(self, *args, **kwargs):
         state = super().state_dict(*args, **kwargs)
         state.pop("_metadata", None)
@@ -24,6 +24,37 @@ class FNO(_BaseFNO):
         state = dict(state)
         state.pop("_metadata", None)
         return super().load_state_dict(state, **kwargs)
+
+
+class FNO(_StripMetadataMixin, _BaseFNO):
+    """
+    Wrapper around neuralop.models.FNO that strips ``_metadata`` from
+    checkpoints for compatibility across PyTorch versions.
+    """
+
+
+class SFNO(_StripMetadataMixin, _BaseSFNO):
+    """
+    Wrapper around neuralop.models.SFNO that strips ``_metadata``.
+    """
+
+
+class TFNO(_StripMetadataMixin, _BaseTFNO):
+    """
+    Wrapper around neuralop.models.TFNO that strips ``_metadata``.
+    """
+
+
+class GINO(_StripMetadataMixin, _BaseGINO):
+    """
+    Wrapper around neuralop.models.GINO that strips ``_metadata``.
+    """
+
+
+class UNO(_StripMetadataMixin, _BaseUNO):
+    """
+    Wrapper around neuralop.models.UNO that strips ``_metadata``.
+    """
 
 
 class LpLoss(object):
@@ -311,6 +342,10 @@ class DeepXDEWrapper(nn.Module):
 
 __all__ = [
     "FNO",
+    "SFNO",
+    "TFNO",
+    "GINO",
+    "UNO",
     "LpLoss",
     "H1Loss",
     "DeepONetCartesianProd",
