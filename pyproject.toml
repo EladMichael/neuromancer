@@ -51,6 +51,9 @@ dependencies = [
     "cvxpylayers",
     "casadi",
     "torchsde",
+    "neuraloperator",
+    "deepxde",
+    "torch-harmonics",
 ]
 
 [project.urls]
