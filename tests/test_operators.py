@@ -1,7 +1,8 @@
+import pytest
 import torch
 import torch.nn as nn
 
-from neuromancer.modules.operators import _StripMetadataMixin
+from neuromancer.modules.operators import DeepXDEWrapper, _StripMetadataMixin
 
 
 class _DummyBase(nn.Module):
@@ -24,6 +25,17 @@ class _DummyStripModel(_StripMetadataMixin, _DummyBase):
     pass
 
 
+class _DummyDeepONet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.last_inputs = None
+
+    def forward(self, inputs):
+        self.last_inputs = inputs
+        branch, trunk = inputs
+        return branch.mean() + trunk.mean()
+
+
 def test_strip_state():
     """Ensure _metadata is stripped from the state dict."""
     model = _DummyStripModel()
@@ -44,3 +56,66 @@ def test_strip_load():
     assert "_metadata" in state_keys
     assert set(state.keys()) == state_keys
     assert "_metadata" not in model.received_state_keys
+
+
+def test_deepxde_cartesian():
+    """Check cartesian trunk (B, m, dim_x) uses shared grid."""
+    model = _DummyDeepONet()
+    wrapper = DeepXDEWrapper(model, is_cartesian=True)
+    branch = torch.randn(2, 3)
+    trunk = torch.randn(2, 4, 5)
+
+    _ = wrapper(branch, trunk)
+
+    assert torch.allclose(model.last_inputs[1], trunk[0])
+
+
+def test_deepxde_cartesian_grid():
+    """Check cartesian trunk (m, dim_x) passes through unchanged."""
+    model = _DummyDeepONet()
+    wrapper = DeepXDEWrapper(model, is_cartesian=True)
+    branch = torch.randn(2, 3)
+    trunk = torch.randn(4, 5)
+
+    _ = wrapper(branch, trunk)
+
+    assert torch.allclose(model.last_inputs[1], trunk)
+
+
+def test_deepxde_pointwise():
+    """Check pointwise trunk (B, dim_x) passes through unchanged."""
+    model = _DummyDeepONet()
+    wrapper = DeepXDEWrapper(model, is_cartesian=False)
+    branch = torch.randn(2, 3)
+    trunk = torch.randn(2, 5)
+
+    _ = wrapper(branch, trunk)
+
+    assert torch.allclose(model.last_inputs[1], trunk)
+
+
+def test_deepxde_dict():
+    """Check dict input returns preds and targets."""
+    model = _DummyDeepONet()
+    wrapper = DeepXDEWrapper(model, is_cartesian=False)
+    batch = {
+        "branch_inputs": torch.randn(2, 3),
+        "trunk_inputs": torch.randn(2, 5),
+        "outputs": torch.randn(2, 1),
+    }
+
+    preds, targets = wrapper(batch)
+
+    assert torch.is_tensor(preds)
+    assert torch.allclose(targets, batch["outputs"])
+
+
+def test_deepxde_bad_trunk():
+    """Check invalid trunk shape raises ValueError."""
+    model = _DummyDeepONet()
+    wrapper = DeepXDEWrapper(model, is_cartesian=False)
+    branch = torch.randn(2, 3)
+    trunk = torch.randn(2, 4, 5)
+
+    with pytest.raises(ValueError):
+        _ = wrapper(branch, trunk)
