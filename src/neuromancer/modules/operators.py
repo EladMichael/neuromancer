@@ -15,11 +15,13 @@ from torch import nn
 
 class _StripMetadataMixin:
     def state_dict(self, *args, **kwargs):
+        """Strip _metadata from state dict."""
         state = super().state_dict(*args, **kwargs)
         state.pop("_metadata", None)
         return state
 
     def load_state_dict(self, state, **kwargs):
+        """Ignore _metadata when loading state dict."""
         # Copy to avoid mutating the caller's dict in-place
         state = dict(state)
         state.pop("_metadata", None)
