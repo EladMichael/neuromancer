@@ -2,7 +2,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from neuromancer.modules.operators import DeepXDEWrapper, _StripMetadataMixin
+from neuromancer.modules.operators import (
+    DeepONetCartesianProd,
+    DeepXDEWrapper,
+    _StripMetadataMixin,
+)
 
 
 class _DummyBase(nn.Module):
@@ -119,3 +123,36 @@ def test_deepxde_bad_trunk():
 
     with pytest.raises(ValueError):
         _ = wrapper(branch, trunk)
+
+
+def test_cartprod_shared_grid():
+    """Check cartesian prod uses the first trunk grid."""
+    branch_net = nn.Identity()
+    trunk_net = nn.Identity()
+    model = DeepONetCartesianProd(branch_net, trunk_net, bias=False)
+    branch = torch.tensor([[1.0, 2.0, 3.0], [0.5, 1.0, -1.0]])
+    grid0 = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    grid1 = torch.tensor([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]])
+    trunk = torch.stack([grid0, grid1], dim=0)
+
+    out = model(branch, trunk)
+
+    expected = torch.einsum("bp,mp->bm", branch, grid0)
+    assert torch.allclose(out, expected)
+
+
+def test_cartprod_transpose_bias():
+    """Check transpose output and bias addition."""
+    branch_net = nn.Identity()
+    trunk_net = nn.Identity()
+    model = DeepONetCartesianProd(branch_net, trunk_net, bias=True, return_transposed=True)
+    model.bias.data.fill_(0.5)
+    branch = torch.tensor([[1.0, 2.0, 3.0], [0.5, 1.0, -1.0]])
+    grid = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    trunk = torch.stack([grid, grid], dim=0)
+
+    out = model(branch, trunk)
+
+    expected = torch.einsum("bp,mp->bm", branch, grid) + 0.5
+    assert out.shape == (grid.shape[0], branch.shape[0])
+    assert torch.allclose(out, expected.transpose(0, 1))
