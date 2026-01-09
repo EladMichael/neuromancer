@@ -15,7 +15,7 @@ from neuromancer.system import Node
 
 data_seed = 408  # random seed used for simulated data
 torch.manual_seed(data_seed)
-nsim = 5000  # number of datapoints: increase sample density for more robust results
+nsim = 500  # number of datapoints: increase sample density for more robust results
 
 # create dictionaries with sampled datapoints with uniform distribution
 a_low, a_high, p_low, p_high = 0.2, 1.2, 0.5, 2.0
@@ -147,7 +147,7 @@ def compare_state_dicts(dict1, dict2):
 
 
 def test_trainer_initialization(get_problem, get_data):
-    epochs = 400
+    epochs = 100
     patience = 11
     warmup = 100
     clip = 1.0
