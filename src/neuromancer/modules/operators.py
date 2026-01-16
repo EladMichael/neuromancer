@@ -342,6 +342,78 @@ class DeepXDEWrapper(nn.Module):
         return (preds, targets) if targets is not None else preds
 
 
+# # src/neuromancer/modules/operators.py
+# from typing import Sequence
+class MIONetWrapper(nn.Module):
+    def __init__(
+        self,
+        model: nn.Module,
+        is_cartesian: bool,
+        branch_keys: list[str],
+        trunk_key: str = "trunk_inputs",
+        output_key: str = "outputs",
+    ) -> None:
+        super().__init__()
+        if len(branch_keys) != 2:
+            raise ValueError("MIONetWrapper expects exactly two branch keys.")
+        self.model = model
+        self.is_cartesian = is_cartesian
+        self.branch_keys = list(branch_keys)
+        self.trunk_key = trunk_key
+        self.output_key = output_key
+
+    def _normalize_trunk(self, trunk: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize trunk input according to is_cartesian flag.
+        """
+        if self.is_cartesian:
+            # Shared-grid (Cartesian-product) DeepONet
+            if trunk.dim() == 3:
+                # (B, m, dim_x) -> shared grid
+                return trunk[0]
+            elif trunk.dim() == 2:
+                # (m, dim_x)
+                return trunk
+            else:
+                raise ValueError(
+                    "Cartesian DeepONet expects trunk_inputs of shape "
+                    "(m, dim_x) or (B, m, dim_x)."
+                )
+        else:
+            # Pointwise DeepONet
+            if trunk.dim() != 2:
+                raise ValueError(
+                    "Pointwise DeepONet expects trunk_inputs of shape (B, dim_x)."
+                )
+            return trunk
+
+    def forward(self, *args, **kwargs):
+        if len(args) == 1 and isinstance(args[0], dict):
+            batch = args[0]
+            branches = [batch[k] for k in self.branch_keys]
+            trunk = batch[self.trunk_key]
+            targets = batch.get(self.output_key)
+        elif len(args) == 3:
+            branch1, branch2, trunk = args
+            branches = [branch1, branch2]
+            targets = kwargs.get("targets")
+        elif len(args) == 2:
+            branches, trunk = args  # branches is list/tuple
+            targets = kwargs.get("targets")
+        else:
+            raise TypeError(
+                "Expected forward(batch_dict), forward(branches, trunk), "
+                "or forward(branch1, branch2, trunk)."
+            )
+
+        if len(branches) != 2:
+            raise ValueError("MIONetWrapper expects exactly two branch inputs.")
+
+        trunk = self._normalize_trunk(trunk)
+        preds = self.model((branches, trunk))
+        return (preds, targets) if targets is not None else preds
+
+
 __all__ = [
     "FNO",
     "SFNO",
@@ -352,4 +424,5 @@ __all__ = [
     "H1Loss",
     "DeepONetCartesianProd",
     "DeepXDEWrapper",
+    "MIONetWrapper",
 ]
