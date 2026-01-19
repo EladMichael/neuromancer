@@ -414,6 +414,38 @@ class MIONetWrapper(nn.Module):
         return (preds, targets) if targets is not None else preds
 
 
+class MIONetRHSWrapper(nn.Module):
+    """
+    Fixed-trunk wrapper with in/out feature attributes for DiffEqIntegrator.
+
+    Expects an MIONet-style model with signature:
+        model(branch1, branch2, trunk) -> du_dt
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        trunk_inputs: torch.Tensor,
+        in_features: int | None = None,
+        out_features: int | None = None,
+    ) -> None:
+        super().__init__()
+        if trunk_inputs.dim() not in (2, 3):
+            raise ValueError("trunk_inputs must have shape (m, dim_x) or (B, m, dim_x).")
+        self.model = model
+        self.register_buffer("trunk_inputs", trunk_inputs)
+
+        if trunk_inputs.dim() == 2:
+            default_dim = trunk_inputs.shape[0]
+        else:
+            default_dim = trunk_inputs.shape[1]
+        self.in_features = default_dim if in_features is None else in_features
+        self.out_features = default_dim if out_features is None else out_features
+
+    def forward(self, state: torch.Tensor, control: torch.Tensor) -> torch.Tensor:
+        return self.model(state, control, self.trunk_inputs)
+
+
 __all__ = [
     "FNO",
     "SFNO",
@@ -425,4 +457,5 @@ __all__ = [
     "DeepONetCartesianProd",
     "DeepXDEWrapper",
     "MIONetWrapper",
+    "MIONetRHSWrapper",
 ]
