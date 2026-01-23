@@ -345,6 +345,10 @@ class DeepXDEWrapper(nn.Module):
 # # src/neuromancer/modules/operators.py
 # from typing import Sequence
 class MIONetWrapper(nn.Module):
+    """
+    //TODO: Merge this with DeepXDEWrapper
+    """
+
     def __init__(
         self,
         model: nn.Module,
@@ -410,16 +414,18 @@ class MIONetWrapper(nn.Module):
             raise ValueError("MIONetWrapper expects exactly two branch inputs.")
 
         trunk = self._normalize_trunk(trunk)
-        preds = self.model((branches, trunk))
+        # DeepXDE MIONetCartesianProd expects inputs as a 3-tuple.
+        preds = self.model((branches[0], branches[1], trunk))
         return (preds, targets) if targets is not None else preds
 
 
-class MIONetRHSWrapper(nn.Module):
+class DeepONetRHSAdapter(nn.Module):
     """
-    Fixed-trunk wrapper with in/out feature attributes for DiffEqIntegrator.
+    Fixed-trunk wrapper with in/out feature attributes for Integrator class.
 
-    Expects an MIONet-style model with signature:
-        model(branch1, branch2, trunk) -> du_dt
+    Need this for neuromancer.dynamics.integrators compatibility.
+    Wrapper around DeepONet to specify in_features/out_features.
+    in_features/out_features should mostly picked from trunk_inputs shape.
     """
 
     def __init__(
@@ -431,7 +437,9 @@ class MIONetRHSWrapper(nn.Module):
     ) -> None:
         super().__init__()
         if trunk_inputs.dim() not in (2, 3):
-            raise ValueError("trunk_inputs must have shape (m, dim_x) or (B, m, dim_x).")
+            raise ValueError(
+                "trunk_inputs must have shape (m, dim_x) or (B, m, dim_x)."
+            )
         self.model = model
         self.register_buffer("trunk_inputs", trunk_inputs)
 
@@ -457,5 +465,5 @@ __all__ = [
     "DeepONetCartesianProd",
     "DeepXDEWrapper",
     "MIONetWrapper",
-    "MIONetRHSWrapper",
+    "DeepONetRHSAdapter",
 ]

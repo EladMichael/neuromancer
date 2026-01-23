@@ -8,14 +8,16 @@ Usage overview:
 
 Examples of common workflows:
   - Use a YAML file for experiment settings and keep CLI minimal.
-  - Resume training by setting resume_path to a checkpoint file.
-  - Disable checkpoint outputs by setting save_best or save_last to 0.
+  - Resume training by setting resume_path or passing --resume_path.
+  - Save best checkpoints by setting save_best or passing --save_best 1.
+  - Disable checkpoint outputs by setting save_best or save_last to 0 or using --save_best/--save_last.
 
 Notes:
   - Supported YAML keys are the same as DEFAULT_CONFIG keys.
   - device accepts \"auto\", \"cuda\", or \"cpu\".
   - dtype currently supports \"float32\" only.
 """
+
 import argparse
 import datetime
 import os
@@ -84,7 +86,9 @@ class Tee:
         Returns:
             bool: True if any stream reports TTY support.
         """
-        return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
+        return any(
+            getattr(stream, "isatty", lambda: False)() for stream in self.streams
+        )
 
 
 @contextmanager
@@ -266,7 +270,9 @@ class RandomBatchDataset(IterableDataset):
         gen = torch.Generator(device="cpu")
         gen.manual_seed(local_seed)
         while True:
-            idx = torch.randperm(self.num_samples, generator=gen, device="cpu")[: self.batch_size]
+            idx = torch.randperm(self.num_samples, generator=gen, device="cpu")[
+                : self.batch_size
+            ]
             u_t_f_batch = self.u_t_f[idx]
             u_next_batch = self.u_next[idx]
             inputs = (u_t_f_batch, self.x_cord)
@@ -385,7 +391,9 @@ def save_checkpoint(path, net, optimizer, scheduler, step, loss_test, config):
         {
             "model_state_dict": net.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+            "scheduler_state_dict": scheduler.state_dict()
+            if scheduler is not None
+            else None,
             "step": step,
             "loss_test": loss_test,
             "seed": config["seed"],
@@ -432,8 +440,16 @@ def plot_train_test_losses(csv_path, result_dir):
     df = pd.read_csv(csv_path)
     fig, (ax1) = plt.subplots(1, 1, figsize=(18, 8), dpi=100)
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c"]
-    ax1.plot(df["epoch"], df["loss"], label="Training Loss", color=colors[0], linestyle="-")
-    ax1.plot(df["epoch"], df["loss_test"], label="Testing Loss", color=colors[1], linestyle="-")
+    ax1.plot(
+        df["epoch"], df["loss"], label="Training Loss", color=colors[0], linestyle="-"
+    )
+    ax1.plot(
+        df["epoch"],
+        df["loss_test"],
+        label="Testing Loss",
+        color=colors[1],
+        linestyle="-",
+    )
     ax1.set_yscale("log")
     ax1.set_xlabel("Epoch", fontsize=24)
     ax1.set_ylabel("Train and Test Loss", fontsize=24)
@@ -494,7 +510,9 @@ def autoregressive_rollout(net, solutions, controls, x_cord, dt, sample_id, devi
         rollout_pred = torch.stack(rollout_pred, dim=0)
 
         mse_loss = torch.mean((true_states - rollout_pred) ** 2)
-        rel_l2_error = torch.linalg.norm(true_states - rollout_pred) / torch.linalg.norm(true_states)
+        rel_l2_error = torch.linalg.norm(
+            true_states - rollout_pred
+        ) / torch.linalg.norm(true_states)
 
     return mse_loss, rel_l2_error, rollout_pred, true_states
 
@@ -536,13 +554,23 @@ def plot_rollout_results(true_states, rollout_pred, x_cord, dt, sample_id, resul
     ax1 = fig.add_subplot(gs[0, 1], sharey=ax0)
     ax2 = fig.add_subplot(gs[0, 2], sharey=ax0)
 
-    im0 = ax0.contourf(x_axis, time_axis, true_states, levels=120, cmap="inferno", vmin=vmin, vmax=vmax)
+    im0 = ax0.contourf(
+        x_axis, time_axis, true_states, levels=120, cmap="inferno", vmin=vmin, vmax=vmax
+    )
     ax0.set_title("FDM Prediction", fontsize=22)
     ax0.set_xlabel("x", fontsize=20)
     ax0.set_ylabel("t", fontsize=20)
     ax0.tick_params(labelsize=18)
 
-    im1 = ax1.contourf(x_axis, time_axis, rollout_pred, levels=120, cmap="inferno", vmin=vmin, vmax=vmax)
+    im1 = ax1.contourf(
+        x_axis,
+        time_axis,
+        rollout_pred,
+        levels=120,
+        cmap="inferno",
+        vmin=vmin,
+        vmax=vmax,
+    )
     ax1.set_title("TI DON Prediction", fontsize=22)
     ax1.set_xlabel("x", fontsize=20)
     ax1.tick_params(labelsize=18, labelleft=False)
@@ -584,7 +612,7 @@ def _dump_config_yaml(config, path):
         with open(path, "w", encoding="utf-8") as f:
             for key, value in config.items():
                 if isinstance(value, str):
-                    f.write(f"{key}: \"{value}\"\n")
+                    f.write(f'{key}: "{value}"\n')
                 else:
                     f.write(f"{key}: {value}\n")
 
@@ -672,14 +700,20 @@ def main():
 
         net = build_model().to(device)
         optimizer = torch.optim.Adam(net.parameters(), lr=config["lr"])
-        lr_lambda = lambda step: config["decay_rate"] ** (step / config["transition_steps"])
+        lr_lambda = lambda step: config["decay_rate"] ** (
+            step / config["transition_steps"]
+        )
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
         best_loss_test = float("inf")
         start_step = 0
         if config["resume_path"]:
             start_step, best_loss_test = load_checkpoint(
-                config["resume_path"], net, optimizer, scheduler, bool(config["resume_strict"])
+                config["resume_path"],
+                net,
+                optimizer,
+                scheduler,
+                bool(config["resume_strict"]),
             )
 
         log_file = os.path.join(result_dir, "log.csv")
@@ -713,7 +747,9 @@ def main():
                     u_state = u_t_f_batch[:, :100]
                     c_t = u_t_f_batch[:, 100:]
                     k1 = net((u_state, c_t, x_cord_full))
-                    u_next_pred = rk4_predict_one_step(net, u_state, c_t, x_cord_full, dt)
+                    u_next_pred = rk4_predict_one_step(
+                        net, u_state, c_t, x_cord_full, dt
+                    )
                     print(f"u_state: {tuple(u_state.shape)}")
                     print(f"c_t: {tuple(c_t.shape)}")
                     print(f"x_loc: {tuple(x_cord_full.shape)}")
@@ -736,7 +772,9 @@ def main():
                     test_x_cord_full = test_x_cord_full.to(device=device, dtype=dtype)
                     test_u_next_batch = test_outputs.to(device=device, dtype=dtype)
                     loss_test = rk4_batch_loss(
-                        net, ((test_u_t_f_batch, test_x_cord_full), test_u_next_batch), dt
+                        net,
+                        ((test_u_t_f_batch, test_x_cord_full), test_u_next_batch),
+                        dt,
                     )
                     l2err_test = torch.sqrt(loss_test)
 
@@ -755,7 +793,15 @@ def main():
                 if config["save_best"] == 1 and loss_test_val < best_loss_test:
                     best_loss_test = loss_test_val
                     best_path = os.path.join(result_dir, "model_best.pt")
-                    save_checkpoint(best_path, net, optimizer, scheduler, step, loss_test_val, config)
+                    save_checkpoint(
+                        best_path,
+                        net,
+                        optimizer,
+                        scheduler,
+                        step,
+                        loss_test_val,
+                        config,
+                    )
                     msg = f"New best model saved at step {step} with loss_test = {loss_test_val}"
                     print(msg)
                     with open(event_log, "a") as f:
@@ -769,7 +815,15 @@ def main():
             loss_test_for_last = (
                 last_loss_test_val if last_loss_test_val is not None else best_loss_test
             )
-            save_checkpoint(last_path, net, optimizer, scheduler, last_step, loss_test_for_last, config)
+            save_checkpoint(
+                last_path,
+                net,
+                optimizer,
+                scheduler,
+                last_step,
+                loss_test_for_last,
+                config,
+            )
 
         plot_train_test_losses(log_file, result_dir)
 
@@ -795,7 +849,9 @@ def main():
         )
 
         sample_indices = np.random.choice(
-            solutions.shape[0], size=config.get("num_samples_to_evaluate", 10), replace=False
+            solutions.shape[0],
+            size=config.get("num_samples_to_evaluate", 10),
+            replace=False,
         )
         all_losses = []
         all_l2_errors = []
@@ -807,7 +863,9 @@ def main():
             l2_item = l2_error.item()
             all_losses.append(loss_item)
             all_l2_errors.append(l2_item)
-            print(f"Sample {idx:4d} | MSE Loss: {loss_item:.4e} | Rel L2: {l2_item:.4e}")
+            print(
+                f"Sample {idx:4d} | MSE Loss: {loss_item:.4e} | Rel L2: {l2_item:.4e}"
+            )
             plot_rollout_results(
                 true.detach().cpu().numpy(),
                 pred.detach().cpu().numpy(),
