@@ -40,6 +40,17 @@ class _DummyDeepONet(nn.Module):
         return branch.mean() + trunk.mean()
 
 
+class _DummyMIONet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.last_inputs = None
+
+    def forward(self, inputs):
+        self.last_inputs = inputs
+        branch1, branch2, trunk = inputs
+        return branch1.mean() + branch2.mean() + trunk.mean()
+
+
 def test_strip_state():
     """Ensure _metadata is stripped from the state dict."""
     model = _DummyStripModel()
@@ -123,6 +134,67 @@ def test_deepxde_bad_trunk():
 
     with pytest.raises(ValueError):
         _ = wrapper(branch, trunk)
+
+
+def test_deepxde_two_branch_positional():
+    """Check two-branch positional inputs are routed correctly."""
+    model = _DummyMIONet()
+    wrapper = DeepXDEWrapper(model, is_cartesian=True, branch_keys=["b1", "b2"])
+    branch1 = torch.randn(2, 3)
+    branch2 = torch.randn(2, 4)
+    trunk = torch.randn(2, 5, 6)
+
+    _ = wrapper(branch1, branch2, trunk)
+
+    assert torch.allclose(model.last_inputs[0], branch1)
+    assert torch.allclose(model.last_inputs[1], branch2)
+    assert torch.allclose(model.last_inputs[2], trunk[0])
+
+
+def test_deepxde_branch_list_single():
+    """Check list input with single branch is accepted."""
+    model = _DummyDeepONet()
+    wrapper = DeepXDEWrapper(model, is_cartesian=False, branch_keys=["b1"])
+    branch = torch.randn(2, 3)
+    trunk = torch.randn(2, 5)
+
+    _ = wrapper([branch], trunk)
+
+    assert torch.allclose(model.last_inputs[0], branch)
+    assert torch.allclose(model.last_inputs[1], trunk)
+
+
+def test_deepxde_branch_tuple_two():
+    """Check tuple input with two branches is accepted."""
+    model = _DummyMIONet()
+    wrapper = DeepXDEWrapper(model, is_cartesian=False, branch_keys=("b1", "b2"))
+    branch1 = torch.randn(2, 3)
+    branch2 = torch.randn(2, 4)
+    trunk = torch.randn(2, 5)
+
+    _ = wrapper((branch1, branch2), trunk)
+
+    assert torch.allclose(model.last_inputs[0], branch1)
+    assert torch.allclose(model.last_inputs[1], branch2)
+    assert torch.allclose(model.last_inputs[2], trunk)
+
+
+def test_deepxde_branch_count_mismatch():
+    """Check mismatch between expected and received branches."""
+    model = _DummyDeepONet()
+    wrapper = DeepXDEWrapper(model, is_cartesian=False, branch_keys=["b1", "b2"])
+    branch = torch.randn(2, 3)
+    trunk = torch.randn(2, 5)
+
+    with pytest.raises(ValueError, match=r"Expected 2 branch inputs, received 1"):
+        _ = wrapper(branch, trunk)
+
+
+def test_deepxde_bad_branch_keys_type():
+    """Check invalid branch_keys types raise TypeError."""
+    model = _DummyDeepONet()
+    with pytest.raises(TypeError, match="branch_keys must be a string or list/tuple"):
+        _ = DeepXDEWrapper(model, is_cartesian=False, branch_keys=1)
 
 
 def test_cartprod_shared_grid():
