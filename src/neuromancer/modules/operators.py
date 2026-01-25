@@ -283,6 +283,7 @@ class DeepXDEWrapper(nn.Module):
 
     trunk_key, output_key : str
         Keys used when calling forward(batch_dict).
+
     """
 
     def __init__(
@@ -381,13 +382,18 @@ class DeepXDEWrapper(nn.Module):
         return (preds, targets) if targets is not None else preds
 
 
-class DeepONetRHSAdapter(nn.Module):
+class DeepXDEIntegratorWrapper(nn.Module):
     """
-    Fixed-trunk wrapper with in/out feature attributes for Integrator class.
+    Fixed-trunk adapter for DeepXDE-style operators.
 
-    Need this for neuromancer.dynamics.integrators compatibility.
-    Wrapper around DeepONet to specify in_features/out_features.
-    in_features/out_features should mostly picked from trunk_inputs shape.
+    This wraps a model that expects inputs as:
+        - (branch, trunk), or
+        - (branch1, branch2, trunk)
+
+    It binds a fixed trunk tensor and exposes in_features/out_features
+    derived from the trunk `m` dimension, which is required by
+    neuromancer.dynamics.integrators. The branch inputs are generic and
+    can represent state/control or any other pair of inputs.
     """
 
     def __init__(
@@ -412,8 +418,12 @@ class DeepONetRHSAdapter(nn.Module):
         self.in_features = default_dim if in_features is None else in_features
         self.out_features = default_dim if out_features is None else out_features
 
-    def forward(self, state: torch.Tensor, control: torch.Tensor) -> torch.Tensor:
-        return self.model(state, control, self.trunk_inputs)
+    def forward(
+        self, branch1: torch.Tensor, branch2: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if branch2 is None:
+            return self.model(branch1, self.trunk_inputs)
+        return self.model(branch1, branch2, self.trunk_inputs)
 
 
 __all__ = [
@@ -426,5 +436,5 @@ __all__ = [
     "H1Loss",
     "DeepONetCartesianProd",
     "DeepXDEWrapper",
-    "DeepONetRHSAdapter",
+    "DeepXDEIntegratorWrapper",
 ]
