@@ -43,15 +43,38 @@ def save_fig(name: str, tight_layout: bool = True):
     plt.close()
 
 
-def flatten_time(U_seq, F_seq):
-    # U_seq: (S, T+1, N), F_seq: (S, T, 4)
-    u_t = U_seq[:, :-1, :]
-    u_next = U_seq[:, 1:, :]
-    f_t = F_seq
+def flatten_time(U_seq, F_seq, nsteps=1):
+    """
+    Flatten time dimension of trajectory data for n-step training samples.
 
-    u_t = u_t.reshape(-1, 1, u_t.shape[-1])
-    f_t = f_t.reshape(-1, 1, f_t.shape[-1])
-    u_next = u_next.reshape(-1, u_next.shape[-1])
+    Args:
+        U_seq (Tensor): Shape (S, T+1, N) - sequence of states.
+        F_seq (Tensor): Shape (S, T, F) - sequence of forcings.
+        nsteps (int): Number of steps ahead for the target state.
+
+    Returns:
+        u_t (Tensor): Shape (S*(T-nsteps+1), 1, N) - current state.
+        f_t (Tensor): Shape (S*(T-nsteps+1), nsteps, F) - forcing sequence.
+        u_next (Tensor): Shape (S*(T-nsteps+1), N) - target state after nsteps.
+    """
+    S, T_plus_1, N = U_seq.shape
+    T = T_plus_1 - 1
+    F = F_seq.shape[-1]
+
+    if nsteps > T:
+        raise ValueError(f"nsteps={nsteps} exceeds sequence length T={T}")
+
+    u_t = U_seq[:, : T - nsteps + 1, :]  # (S, T-n+1, N)
+    u_next = U_seq[:, nsteps : T + 1, :]  # (S, T-n+1, N)
+
+    f_t_seq = [F_seq[:, i : T - nsteps + 1 + i, :] for i in range(nsteps)]
+    f_t = torch.stack(f_t_seq, dim=2)  # (S, T-n+1, nsteps, F)
+
+    # Flatten samples
+    u_t = u_t.reshape(-1, 1, N)
+    f_t = f_t.reshape(-1, nsteps, F)
+    u_next = u_next.reshape(-1, N)
+
     return u_t, f_t, u_next
 
 
@@ -298,19 +321,10 @@ def main():
     print("dt:", dt)
 
     # -------------------------------------------------------------------------
-    # Sequences and shuffle/split
+    # Sequences and split
     # -------------------------------------------------------------------------
     U = solutions  # (samples, T+1, N)
     F = controls  # (samples, T, 4)
-
-    num_samples = U.shape[0]
-    g = torch.Generator(device="cpu").manual_seed(seed)
-    idx = torch.randperm(num_samples, generator=g, device="cpu")
-
-    print("Shuffled indices: ", str(idx))
-
-    U = U[idx]
-    F = F[idx]
 
     train_frac = 0.8
     n_train = int(train_frac * U.shape[0])
@@ -480,7 +494,7 @@ def main():
     # -------------------------------------------------------------------------
     # Training configuration
     # -------------------------------------------------------------------------
-    epochs = int(10)
+    epochs = int(2)
     log_every = 100
     lr = 1e-3
     transition_steps = 2000
