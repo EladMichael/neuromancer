@@ -27,6 +27,7 @@ from neuromancer.modules.operators import DeepXDEIntegratorWrapper
 from neuromancer.modules.operators import DeepXDEWrapper
 from neuromancer.problem import Problem
 from neuromancer.system import Node
+from neuromancer.system import System
 from neuromancer.trainer import Trainer
 
 
@@ -42,14 +43,26 @@ def save_fig(name: str, tight_layout: bool = True):
     plt.close()
 
 
-def build_dictdataset(b1, b2, y, name, trunk_grid):
-    trunk_inputs = trunk_grid.expand(b1.shape[0], -1, -1)  # (N, 100, 1)
+def flatten_time(U_seq, F_seq):
+    # U_seq: (S, T+1, N), F_seq: (S, T, 4)
+    u_t = U_seq[:, :-1, :]
+    u_next = U_seq[:, 1:, :]
+    f_t = F_seq
+
+    u_t = u_t.reshape(-1, 1, u_t.shape[-1])
+    f_t = f_t.reshape(-1, 1, f_t.shape[-1])
+    u_next = u_next.reshape(-1, u_next.shape[-1])
+    return u_t, f_t, u_next
+
+
+def build_dictdataset_flat(u_t, f_t, u_next, name, trunk_grid):
+    trunk_inputs = trunk_grid.expand(u_t.shape[0], -1, -1)  # (S*T, 100, 1)
     return DictDataset(
         {
-            "u_t": b1.float(),  # (N, 100)
-            "f_t": b2.float(),  # (N, 4)
-            "trunk_inputs": trunk_inputs.float(),  # (N, 100, 1)
-            "outputs": y.float(),  # (N, 100)
+            "u_t": u_t.float(),  # (S*T, 1, 100)
+            "f_t": f_t.float(),  # (S*T, 1, 4)
+            "outputs": u_next.float(),  # (S*T, 100)
+            "trunk_inputs": trunk_inputs.float(),
         },
         name=name,
     )
@@ -105,32 +118,40 @@ class StepLRSchedulerCallback(Callback):
         self.global_step += 1
 
 
-def autoregressive_rollout(sample_id_value, problem, solutions, controls, device):
-    node = problem.nodes[0].to(device)
-    node.eval()
+def autoregressive_rollout(
+    sample_id_value,
+    dynamics_model,
+    solutions,
+    controls,
+    device,
+    rollout_steps=None,
+):
+    system = dynamics_model.to(device)
+    system.eval()
 
     with torch.no_grad():
-        u_t = solutions[sample_id_value, 0, :].float().to(device)
+        u0 = solutions[sample_id_value, 0, :].float().to(device)
         true_states = solutions[sample_id_value, :, :].float().to(device)
         control_seq = controls[sample_id_value, :, :].float().to(device)
 
-        preds = [u_t]
-        for t in range(control_seq.shape[0]):
-            batch = {
-                "u_t": u_t.unsqueeze(0),
-                "f_t": control_seq[t : t + 1, :],
-            }
-            out = node(batch)
-            u_t = out["u_t"].squeeze(0)
-            preds.append(u_t)
+        if rollout_steps is None:
+            rollout_steps = control_seq.shape[0]
+        system.nsteps = rollout_steps  # change nsteps for full rollout
 
-        rollout_pred = torch.stack(preds, dim=0)
-        mse_loss = torch.mean((true_states - rollout_pred) ** 2)
-        rel_l2_error = torch.linalg.norm(
-            true_states - rollout_pred
-        ) / torch.linalg.norm(true_states)
+        batch = {
+            "u_t": u0.unsqueeze(0).unsqueeze(1),  # (B, 1, N)
+            "f_t": control_seq[:rollout_steps].unsqueeze(0),  # (B, T, 4)
+        }
+        out = system(batch)
+        rollout_pred = out["u_t"].squeeze(0)  # (T+1, N)
 
-    return mse_loss, rel_l2_error, rollout_pred, true_states
+        true_traj = true_states[: rollout_steps + 1]
+        mse_loss = torch.mean((true_traj - rollout_pred) ** 2)
+        rel_l2_error = torch.linalg.norm(true_traj - rollout_pred) / torch.linalg.norm(
+            true_traj
+        )
+
+    return mse_loss, rel_l2_error, rollout_pred, true_traj
 
 
 def plot_rollout_results(
@@ -205,26 +226,24 @@ def plot_rollout_results(
     save_fig(f"rollout_sample_{sample_id_value}.png", tight_layout=False)
 
 
-def rollout_and_plot(sample_id_value, problem, solutions, controls, x_cord, dt, device):
-    node = problem.nodes[0].to(device)
-    node.eval()
-
-    with torch.no_grad():
-        u_t = solutions[sample_id_value, 0, :].float().to(device)
-        true_states = solutions[sample_id_value, :, :].float().to(device)
-        control_seq = controls[sample_id_value, :, :].float().to(device)
-
-        preds = [u_t]
-        for t in range(control_seq.shape[0]):
-            batch = {
-                "u_t": u_t.unsqueeze(0),
-                "f_t": control_seq[t : t + 1, :],
-            }
-            out = node(batch)
-            u_t = out["u_t"].squeeze(0)
-            preds.append(u_t)
-
-        rollout_pred = torch.stack(preds, dim=0)
+def rollout_and_plot(
+    sample_id_value,
+    dynamics_model,
+    solutions,
+    controls,
+    x_cord,
+    dt,
+    device,
+    rollout_steps=None,
+):
+    mse_loss, rel_l2_error, rollout_pred, true_states = autoregressive_rollout(
+        sample_id_value,
+        dynamics_model,
+        solutions,
+        controls,
+        device,
+        rollout_steps=rollout_steps,
+    )
 
     plot_rollout_results(
         true_states.detach().cpu().numpy(),
@@ -234,17 +253,18 @@ def rollout_and_plot(sample_id_value, problem, solutions, controls, x_cord, dt, 
         sample_id_value,
     )
 
+    return mse_loss, rel_l2_error
+
 
 def main():
-    # Set default dtype to float32
+    # -------------------------------------------------------------------------
+    # Configuration
+    # -------------------------------------------------------------------------
     torch.set_default_dtype(torch.float)
-    # PyTorch random seed
     seed = 1234
     torch.manual_seed(seed)
-    # NumPy random seed
     np.random.seed(seed)
 
-    # Device configuration
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     elif torch.cuda.is_available():
@@ -257,17 +277,17 @@ def main():
     # -------------------------------------------------------------------------
     # Data loading
     # -------------------------------------------------------------------------
-    data_path = "/home/pk222/projects/PDEControl_DPC/datasets/heat_smooth_f_dataset.npz"
+    data_path = "pathto/datasets/heat_smooth_f_dataset.npz"
 
     dataset = np.load(data_path)  # total 3000 samples available
-    samples_to_load = 100
+    samples_to_load = 100  # samples or number of trajectories to load
 
     solutions = torch.from_numpy(
         dataset["solutions"][:samples_to_load]
     )  # shape: (samples, T+1, N)
     controls = torch.from_numpy(
         dataset["controls"][:samples_to_load]
-    )  # shape: (samples, T, 2)
+    )  # shape: (samples, T, 4)
     x_cord = torch.from_numpy(dataset["x"]).reshape(-1, 1)  # shape: (N, 1)
     dt = dataset["dt"]  # likely a scalar numpy value
 
@@ -278,107 +298,64 @@ def main():
     print("dt:", dt)
 
     # -------------------------------------------------------------------------
-    # Prepare training pairs
+    # Sequences and shuffle/split
     # -------------------------------------------------------------------------
-    # Slice u_t and u_{t+1}
-    u_t = solutions[:, :-1, :]  # (samples, T, N)
-    u_next = solutions[:, 1:, :]  # (samples, T, N)
-    f_t = controls[:, :, :]  # (samples, T, 2)
+    U = solutions  # (samples, T+1, N)
+    F = controls  # (samples, T, 4)
 
-    print("u_t: ", str(u_t.shape))
-    print("u_next: ", str(u_next.shape))
-    print("f_t: ", str(f_t.shape))
-
-    # -------------------------------------------------------------------------
-    # Flatten dataset
-    # -------------------------------------------------------------------------
-    # flatten (samples × time)
-    branch_x1 = u_t.reshape(-1, u_t.shape[-1])  # (N, 100)
-    branch_x2 = f_t.reshape(-1, f_t.shape[-1])  # (N, 4)
-    outputs = u_next.reshape(-1, u_next.shape[-1])  # (N, 100)
-
-    print("branch_x1: ", str(branch_x1.shape))
-    print("branch_x2: ", str(branch_x2.shape))
-    print("outputs: ", str(outputs.shape))
-
-    # -------------------------------------------------------------------------
-    # Shuffle and split
-    # -------------------------------------------------------------------------
-    # Shuffle indices (do this on CPU for convenience)
-    num_samples = branch_x1.shape[0]
+    num_samples = U.shape[0]
     g = torch.Generator(device="cpu").manual_seed(seed)
     idx = torch.randperm(num_samples, generator=g, device="cpu")
 
     print("Shuffled indices: ", str(idx))
 
-    branch_x1 = branch_x1[idx]
-    branch_x2 = branch_x2[idx]
-    outputs = outputs[idx]
+    U = U[idx]
+    F = F[idx]
 
-    # split
-    train_frac = 0.8  # percentage
-    n_train = int(train_frac * num_samples)
+    train_frac = 0.8
+    n_train = int(train_frac * U.shape[0])
 
-    print("Number of training samples: ", n_train)
+    U_train, U_test = U[:n_train], U[n_train:]
+    F_train, F_test = F[:n_train], F[n_train:]
+
+    # -------------------------------------------------------------------------
+    # Flatten time for one-step training
+    # -------------------------------------------------------------------------
+    u_t_tr, f_t_tr, u_next_tr = flatten_time(U_train, F_train)
+    u_t_te, f_t_te, u_next_te = flatten_time(U_test, F_test)
 
     # -------------------------------------------------------------------------
     # Neuromancer datasets
     # -------------------------------------------------------------------------
     trunk_grid = torch.as_tensor(x_cord, dtype=torch.float32).reshape(-1, 1)
 
-    train_ds = build_dictdataset(
-        branch_x1[:n_train],
-        branch_x2[:n_train],
-        outputs[:n_train],
-        "train",
-        trunk_grid,
-    )
-    test_ds = build_dictdataset(
-        branch_x1[n_train:],
-        branch_x2[n_train:],
-        outputs[n_train:],
-        "test",
-        trunk_grid,
-    )
+    train_ds = build_dictdataset_flat(u_t_tr, f_t_tr, u_next_tr, "train", trunk_grid)
+    test_ds = build_dictdataset_flat(u_t_te, f_t_te, u_next_te, "test", trunk_grid)
 
-    # check dimensions
     print("Dimensions check train:")
-    print(
-        "branch_inputs_1 -> u_t:", train_ds.datadict["u_t"].shape
-    )  # (N, 100) spatial field
-    print(
-        "branch_inputs_2 -> f_t :", train_ds.datadict["f_t"].shape
-    )  # (N, 4) actuators
-    print(
-        "trunk_inputs -> x_coord:", train_ds.datadict["trunk_inputs"].shape
-    )  # (N, 100, 1) grid., broadcasted N times
-    print(
-        "outputs- > u_t+1:", train_ds.datadict["outputs"].shape
-    )  # (N, 100) output field
+    print("u_t (step):", train_ds.datadict["u_t"].shape)
+    print("f_t (step):", train_ds.datadict["f_t"].shape)
+    print("outputs (u_next):", train_ds.datadict["outputs"].shape)
+    print("trunk_inputs:", train_ds.datadict["trunk_inputs"].shape)
 
     print("Dimensions check test:")
-    print(
-        "branch_inputs_1 -> u_t:", test_ds.datadict["u_t"].shape
-    )  # (N, 100) spatial field
-    print("branch_inputs_2 - f_t :", test_ds.datadict["f_t"].shape)  # (N, 4) actuators
-    print(
-        "trunk_inputs-> x_coord:", test_ds.datadict["trunk_inputs"].shape
-    )  # (N, 100, 1) grid., broadcasted N times
-    print(
-        "outputs -> u_t+1:", test_ds.datadict["outputs"].shape
-    )  # (N, 100) output field
+    print("u_t (step):", test_ds.datadict["u_t"].shape)
+    print("f_t (step):", test_ds.datadict["f_t"].shape)
+    print("outputs (u_next):", test_ds.datadict["outputs"].shape)
+    print("trunk_inputs:", test_ds.datadict["trunk_inputs"].shape)
 
     # -------------------------------------------------------------------------
     # Data loaders
     # -------------------------------------------------------------------------
-    batch_size = 25
+    batch_size = 75
     print(f"batch_size: {batch_size}")
 
-    # Do this on device, as it needs to for Training
     g_device = torch.Generator(device=device).manual_seed(seed)
 
     steps_per_epoch = 1000
     num_samples = steps_per_epoch * batch_size
+
+    g_device = torch.Generator(device=device).manual_seed(seed)
 
     sampler = torch.utils.data.RandomSampler(
         train_ds,
@@ -396,7 +373,6 @@ def main():
         shuffle=False,  # must be False when sampler is provided
     )
 
-    # Only shuffle the training set
     test_loader = torch.utils.data.DataLoader(
         test_ds,
         batch_size=batch_size,
@@ -424,11 +400,11 @@ def main():
         layer_sizes_branch2=layer_sizes_branch2,
         layer_sizes_trunk=layer_sizes_trunk,
         activation=activation,
-        kernel_initializer="Glorot normal",  # weight initialisation available in DeepXDE
-        trunk_last_activation=True,  # matches the JAX trunk applying tanh after every Dense
-        merge_operation="mul",  # y_func = y_func1 * y_func2
-        layer_sizes_merger=None,  # no extra merger MLP
-        layer_sizes_output_merger=None,  # keep dot-product einsum
+        kernel_initializer="Glorot normal",
+        trunk_last_activation=True,
+        merge_operation="mul",
+        layer_sizes_merger=None,
+        layer_sizes_output_merger=None,
     )
 
     # -------------------------------------------------------------------------
@@ -439,14 +415,11 @@ def main():
         is_cartesian=True,
         branch_keys=["u_t", "f_t"],
     )
-    # print(deeponet_wrapped)
 
     deeponet_integrator = DeepXDEIntegratorWrapper(
         model=deeponet_wrapped,
         trunk_inputs=trunk_grid,
     )
-
-    # print(deeponet_integrator)
 
     fxRK4 = integrators.DiffEqIntegrator(deeponet_integrator, h=dt, method="rk4")
 
@@ -458,28 +431,56 @@ def main():
     )
 
     # -------------------------------------------------------------------------
+    # System for one-step training
+    # -------------------------------------------------------------------------
+    nsteps = 1
+    dynamics_model = System(
+        nodes=[node_rk4],
+        name="Dynamics_system",
+        nsteps=nsteps,
+    )
+
+    dynamics_model.show()
+
+    # -------------------------------------------------------------------------
+    # Dimension checks
+    # -------------------------------------------------------------------------
+    batch = next(iter(train_loader))
+    for k, v in batch.items():
+        if hasattr(v, "shape"):
+            print(k, v.shape)
+        else:
+            print(k, type(v), v)
+
+    tensor_batch = {k: v.to(device) for k, v in batch.items() if hasattr(v, "shape")}
+    dynamics_model = dynamics_model.to(device)
+    out = dynamics_model(tensor_batch)
+    print("System out keys:", out.keys())
+    print("u_t out shape:", out["u_t"].shape)
+
+    # -------------------------------------------------------------------------
     # Loss and problem
     # -------------------------------------------------------------------------
-    var_y_est = variable("u_t")
+    var_y_est = variable("u_t")[:, 1, :]
     var_y_true = variable("outputs")
 
-    # MSE: mean((u_next - outputs)^2)
     mse_var = (var_y_est - var_y_true) ** 2
     mse_obj = Objective(mse_var, metric=torch.mean, name="mse_loss")
 
     loss = PenaltyLoss(objectives=[mse_obj], constraints=[])
 
-    # Use RK4 node
     problem = Problem(
-        nodes=[node_rk4],
+        nodes=[dynamics_model],
         loss=loss,
+        #   grad_inference=True
     )
+
+    problem.show()
 
     # -------------------------------------------------------------------------
     # Training configuration
     # -------------------------------------------------------------------------
-    # result_dir = './'
-    epochs = int(1)  # 10 passes of 1000 steps each
+    epochs = int(10)
     log_every = 100
     lr = 1e-3
     transition_steps = 2000
@@ -492,21 +493,18 @@ def main():
         lr_lambda=lambda step: exponential_decay(step, decay_rate, transition_steps),
     )
 
-    lr_callback = StepLRSchedulerCallback(
-        scheduler, log_every=log_every
-    )  # set as needed
+    lr_callback = StepLRSchedulerCallback(scheduler, log_every=log_every)
 
     trainer = Trainer(
         problem.to(device),
         train_data=train_loader,
-        # dev_data=dev_loader,        # optional
         test_data=test_loader,
         optimizer=optimizer,
         callback=lr_callback,
         epochs=epochs,
         epoch_verbose=1,
         train_metric="train_loss",
-        dev_metric="train_loss",  # or "dev_loss" if you use dev_data
+        dev_metric="train_loss",
         eval_metric="train_loss",
         test_metric="test_loss",
         warmup=epochs,
@@ -518,10 +516,7 @@ def main():
     # -------------------------------------------------------------------------
     best_model = trainer.train()
 
-    # load best trained model
-    trainer.dev_data = (
-        trainer.train_data
-    )  # workaround for replacing dev set to match keys
+    trainer.dev_data = trainer.train_data
     best_outputs = trainer.test(best_model)
     problem.load_state_dict(best_model)
 
@@ -555,17 +550,88 @@ def main():
     save_fig("training_history.png", tight_layout=False)
 
     # -------------------------------------------------------------------------
-    # Autoregressive rollout
+    # Autoregressive rollout (single sample)
     # -------------------------------------------------------------------------
-    sample_id = 12  # change this to test other samples
+    sample_id = 12
     mse_loss, rel_l2_error, rollout_pred, true_states = autoregressive_rollout(
-        sample_id, problem, solutions, controls, device
+        sample_id,
+        dynamics_model,
+        solutions,
+        controls,
+        device,
     )
     print(mse_loss.item(), rel_l2_error.item())
 
-    # assumes plot_rollout_results is already defined
-    # run it
-    rollout_and_plot(sample_id, problem, solutions, controls, x_cord, dt, device)
+    rollout_and_plot(
+        sample_id,
+        dynamics_model,
+        solutions,
+        controls,
+        x_cord,
+        dt,
+        device,
+    )
+
+    # -------------------------------------------------------------------------
+    # Evaluation over multiple samples
+    # -------------------------------------------------------------------------
+    num_samples_to_evaluate = 5
+    dt_value = dt
+    result_dir = None  # set to a path if you want to save figures
+
+    sample_id = 0
+    mse_loss, rel_l2_error, rollout_pred, true_states = autoregressive_rollout(
+        sample_id,
+        dynamics_model,
+        solutions,
+        controls,
+        device,
+    )
+
+    print(f"Test MSE Loss: {mse_loss.item():.4e}")
+    print(f"Relative L2 Error: {rel_l2_error.item():.4e}")
+
+    plot_rollout_results(
+        true_states.detach().cpu().numpy(),
+        rollout_pred.detach().cpu().numpy(),
+        x_cord.detach().cpu().numpy(),
+        dt_value,
+        sample_id,
+    )
+
+    sample_indices = np.random.choice(
+        solutions.shape[0], size=num_samples_to_evaluate, replace=False
+    )
+
+    all_losses = []
+    all_l2_errors = []
+
+    for idx in sample_indices:
+        loss_val, l2_error, pred, true = autoregressive_rollout(
+            idx,
+            dynamics_model,
+            solutions,
+            controls,
+            device,
+        )
+        all_losses.append(loss_val.item())
+        all_l2_errors.append(l2_error.item())
+
+        print(
+            f"Sample {idx:4d} | MSE Loss: {loss_val.item():.4e} | Rel L2: {l2_error.item():.4e}"
+        )
+
+        plot_rollout_results(
+            true.detach().cpu().numpy(),
+            pred.detach().cpu().numpy(),
+            x_cord.detach().cpu().numpy(),
+            dt_value,
+            idx,
+        )
+
+    print(f"\n==== Summary over {num_samples_to_evaluate} samples ====")
+    print(f"Avg MSE Loss     : {np.mean(np.array(all_losses)):.4e}")
+    print(f"Avg Rel L2 Error : {np.mean(np.array(all_l2_errors)):.4e}")
 
 
 if __name__ == "__main__":
