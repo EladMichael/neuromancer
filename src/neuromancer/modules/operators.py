@@ -246,7 +246,7 @@ class DeepONetCartesianProd(nn.Module):
 
 class DeepXDEWrapper(nn.Module):
     """
-    Wrapper for DeepONet-style models in DeepXDE.
+    Wrapper for DeepXDE models with one or two branch inputs.
 
     The user must specify whether the wrapped model uses
     Cartesian-product (shared-grid) dde.nn.DeepONetCartesianProd or
@@ -255,8 +255,9 @@ class DeepXDEWrapper(nn.Module):
     Parameters
     ----------
     model : nn.Module
-        DeepONet-style model from DeepXDE that expects inputs
-        as (branch_inputs, trunk_inputs).
+        DeepXDE model that expects inputs as:
+            - (branch_inputs, trunk_inputs), or
+            - (branch1_inputs, branch2_inputs, trunk_inputs)
 
     B = Batch size or NSamples
     m = number of sensors / trunk locations
@@ -276,22 +277,37 @@ class DeepXDEWrapper(nn.Module):
             - Required trunk shape:
                 * (B, dim_x)
 
-    branch_key, trunk_key, output_key : str
+    branch_keys : str | list[str] | tuple[str, ...]
+        Branch input key(s) used when calling forward(batch_dict).
+        Must be length 1 or 2 after normalization.
+
+    trunk_key, output_key : str
         Keys used when calling forward(batch_dict).
+
     """
 
     def __init__(
         self,
         model: nn.Module,
         is_cartesian: bool,
-        branch_key: str = "branch_inputs",
+        branch_keys: str | list[str] | tuple[str, ...] = "branch_inputs",
         trunk_key: str = "trunk_inputs",
         output_key: str = "outputs",
     ) -> None:
         super().__init__()
+        if isinstance(branch_keys, str):
+            branch_keys_list = [branch_keys]
+        elif isinstance(branch_keys, (list, tuple)):
+            branch_keys_list = list(branch_keys)
+        else:
+            raise TypeError("branch_keys must be a string or list/tuple of strings.")
+        if len(branch_keys_list) not in (1, 2):
+            raise ValueError(
+                f"Expected 1 or 2 branch keys, received {len(branch_keys_list)}."
+            )
         self.model = model
         self.is_cartesian = is_cartesian
-        self.branch_key = branch_key
+        self.branch_keys = branch_keys_list
         self.trunk_key = trunk_key
         self.output_key = output_key
 
@@ -320,26 +336,94 @@ class DeepXDEWrapper(nn.Module):
                 )
             return trunk
 
-    def forward(self, *args, **kwargs):
-        # Case 1: dict batch
+    def _parse_inputs(self, *args, **kwargs):
         if len(args) == 1 and isinstance(args[0], dict):
             batch = args[0]
-            branch = batch[self.branch_key]
+            branches = [batch[k] for k in self.branch_keys]
             trunk = batch[self.trunk_key]
             targets = batch.get(self.output_key)
-
-        # Case 2: positional tensors
-        elif len(args) >= 2:
-            branch, trunk = args[:2]
+        elif len(args) == 3:
+            branch1, branch2, trunk = args
+            branches = [branch1, branch2]
             targets = kwargs.get("targets")
-
+        elif len(args) == 2:
+            branches_or_branch, trunk = args
+            if isinstance(branches_or_branch, (list, tuple)):
+                branches = list(branches_or_branch)
+            else:
+                branches = [branches_or_branch]
+            targets = kwargs.get("targets")
         else:
-            raise TypeError("Expected forward(batch_dict) or forward(branch, trunk).")
+            raise TypeError(
+                "Expected forward(batch_dict), forward(branch, trunk), "
+                "forward(branch1, branch2, trunk), or forward(branches, trunk)."
+            )
 
+        expected = len(self.branch_keys)
+        received = len(branches)
+        if received != expected:
+            raise ValueError(f"Expected {expected} branch inputs, received {received}.")
+
+        return branches, trunk, targets
+
+    def forward(self, *args, **kwargs):
+        branches, trunk, targets = self._parse_inputs(*args, **kwargs)
         trunk = self._normalize_trunk(trunk)
-        preds = self.model((branch, trunk))
+
+        if len(branches) == 1:
+            preds = self.model((branches[0], trunk))
+        elif len(branches) == 2:
+            preds = self.model((branches[0], branches[1], trunk))
+        else:
+            raise ValueError(
+                f"Expected 1 or 2 branch inputs, received {len(branches)}."
+            )
 
         return (preds, targets) if targets is not None else preds
+
+
+class DeepXDEIntegratorWrapper(nn.Module):
+    """
+    Fixed-trunk adapter for DeepXDE-style operators.
+
+    This wraps a model that expects inputs as:
+        - (branch, trunk), or
+        - (branch1, branch2, trunk)
+
+    It binds a fixed trunk tensor and exposes in_features/out_features
+    derived from the trunk `m` dimension, which is required by
+    neuromancer.dynamics.integrators. The branch inputs are generic and
+    can represent state/control or any other pair of inputs.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        trunk_inputs: torch.Tensor,
+        in_features: int | None = None,
+        out_features: int | None = None,
+    ) -> None:
+        super().__init__()
+        if trunk_inputs.dim() not in (2, 3):
+            raise ValueError(
+                "trunk_inputs must have shape (m, dim_x) or (B, m, dim_x)."
+            )
+        self.model = model
+        self.register_buffer("trunk_inputs", trunk_inputs)
+
+        if trunk_inputs.dim() == 2:
+            default_dim = trunk_inputs.shape[0]
+        else:
+            default_dim = trunk_inputs.shape[1]
+        self.in_features = default_dim if in_features is None else in_features
+        self.out_features = default_dim if out_features is None else out_features
+
+    def forward(
+        self, branch1: torch.Tensor, branch2: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if branch2 is None:
+            return self.model(branch1, self.trunk_inputs)
+        return self.model(branch1, branch2, self.trunk_inputs)
 
 
 __all__ = [
@@ -352,4 +436,5 @@ __all__ = [
     "H1Loss",
     "DeepONetCartesianProd",
     "DeepXDEWrapper",
+    "DeepXDEIntegratorWrapper",
 ]
