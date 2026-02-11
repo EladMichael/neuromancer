@@ -54,6 +54,7 @@ dependencies = [
     "neuraloperator",
     "deepxde",
     "torch-harmonics",
+    "gpytorch"
 ]
 
 [project.urls]
