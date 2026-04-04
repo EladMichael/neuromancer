@@ -1,0 +1,42 @@
+name: Run Notebook Tests #name of action
+
+on: #trigger event
+  push:
+    branches:
+      - develop #execute on a push to develop branch
+  pull_request:
+    branches:
+      - develop #execute on a pull request targeting develop branch
+
+jobs: #define set of jobs. Here there is only one job, each job is instantiated on a Github-hosted runner
+  notebooks: #name of the job
+    runs-on: ubuntu-latest #runner runs on latest version of Ubuntu
+    timeout-minutes: 360 #cap at 6 hours to avoid runaway billing; very long notebooks may need to be excluded or split
+    steps: #this job is associated with a series of steps
+
+      # step 1: syntax for telling GHA to use this repository's code as "root" directory. Rest of GHA is able to have access
+      - uses: actions/checkout@v3
+      # step 2: syntax for telling GHA to set-up Python on this runner associated for this whole job
+      - uses: actions/setup-python@v3
+
+      # Step 3: install package dependencies from pyproject.toml plus notebook execution tooling for this runner
+      - name: Install dependencies #name of this step
+        run: | #indicate that following script is meant to be multi-line
+          pip install .
+          pip install nbconvert jupyter ipykernel
+
+      # Step 4: register a fresh CI kernel from this runner's Python environment for notebook execution
+      #   The ci-kernel name is recreated on every run, so it does not depend on whether contributors use
+      #   uv, conda, venv, or another environment manager locally. The only requirement is that
+      #   pyproject.toml declares all notebook dependencies correctly.
+      - name: Register Jupyter kernel
+        run: |
+          python -m ipykernel install --user --name=ci-kernel
+          jupyter kernelspec list
+
+      # Step 5: execute every notebook from the repository root using the CI kernel
+      #   run_notebooks.sh uses -1 here to disable per-notebook execution timeouts because some notebooks
+      #   train GPU-style models for a long time. GitHub Actions free-tier jobs still have a 6-hour limit.
+      - name: Run notebooks
+        run: |
+          bash ./run_notebooks.sh ci-kernel . -1
