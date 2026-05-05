@@ -57,6 +57,9 @@ jobs:
         if: steps.detect.outputs.count != '0'
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends graphviz
+          dot -V
           python -m pip install --upgrade pip
           python -m pip install ".[examples]" nbconvert jupyter ipykernel
 
