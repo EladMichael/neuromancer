@@ -6,6 +6,11 @@ on:
       - develop
   workflow_dispatch:
 
+env:
+  NOTEBOOK_CI_SKIP_NOTEBOOKS: |
+    examples/neural_operators/Part_8_TIDON_HEAT.ipynb
+    examples/control/Part_7_TIDON_DPC_HEAT.ipynb
+
 jobs:
   notebooks:
     runs-on: ubuntu-latest

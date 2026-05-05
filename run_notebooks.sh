@@ -43,6 +43,8 @@ trap cleanup EXIT
 
 selected_notebooks=()
 excluded_notebooks=()
+ci_skip_notebooks=()
+ci_skipped_notebooks=()
 missing_notebooks=()
 passed_notebooks=()
 failed_notebooks=()
@@ -105,6 +107,32 @@ is_excluded_notebook() {
   return 1
 }
 
+load_ci_skip_list() {
+  local line
+  local path
+
+  [[ -n "${NOTEBOOK_CI_SKIP_NOTEBOOKS:-}" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    path="$(normalize_path "$line")"
+    ci_skip_notebooks+=("$path")
+  done <<< "$NOTEBOOK_CI_SKIP_NOTEBOOKS"
+}
+
+is_ci_skipped_notebook() {
+  local path="$1"
+  local skipped
+
+  for skipped in "${ci_skip_notebooks[@]}"; do
+    if [[ "$path" == "$skipped" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 add_candidate() {
   local raw_path="$1"
   local path
@@ -114,6 +142,11 @@ add_candidate() {
 
   if is_excluded_notebook "$path"; then
     excluded_notebooks+=("$path")
+    return 0
+  fi
+
+  if is_ci_skipped_notebook "$path"; then
+    ci_skipped_notebooks+=("$path")
     return 0
   fi
 
@@ -201,9 +234,14 @@ print_list() {
 print_summary() {
   echo "::group::Notebook summary"
   echo "Selected: ${#selected_notebooks[@]}"
+  echo "CI skipped: ${#ci_skipped_notebooks[@]}"
   echo "Passed: ${#passed_notebooks[@]}"
   echo "Failed: ${#failed_notebooks[@]}"
   echo "Timed out: ${#timed_out_notebooks[@]}"
+
+  if [[ "${#ci_skipped_notebooks[@]}" -gt 0 ]]; then
+    print_list "CI-skipped notebooks" "${ci_skipped_notebooks[@]}"
+  fi
 
   if [[ "${#failed_notebooks[@]}" -gt 0 ]]; then
     print_list "Failed notebooks" "${failed_notebooks[@]}"
@@ -268,6 +306,8 @@ run_notebook() {
   echo "::endgroup::"
 }
 
+load_ci_skip_list
+
 list_mode="full"
 if [[ -n "$NOTEBOOK_LIST_FILE" ]]; then
   list_mode="explicit"
@@ -282,8 +322,18 @@ echo "::group::Notebook selection"
 echo "Working directory: $(pwd)"
 echo "Selection mode: $list_mode"
 
+if [[ "${#ci_skip_notebooks[@]}" -gt 0 ]]; then
+  echo "CI notebook exceptions are enabled."
+  echo "Reason: these notebooks require an external data source that is too large for CI."
+  print_list "Configured CI notebook exceptions" "${ci_skip_notebooks[@]}"
+fi
+
 if [[ "${#excluded_notebooks[@]}" -gt 0 ]]; then
   print_list "Excluded notebook candidates" "${excluded_notebooks[@]}"
+fi
+
+if [[ "${#ci_skipped_notebooks[@]}" -gt 0 ]]; then
+  print_list "CI-skipped notebook candidates" "${ci_skipped_notebooks[@]}"
 fi
 
 if [[ "${#missing_notebooks[@]}" -gt 0 ]]; then
@@ -310,7 +360,12 @@ fi
 
 echo "::group::Notebook execution assumptions"
 echo "Selected notebooks are executed as-is."
-echo "No notebooks are skipped for data files, checkpoints, GPU availability, credentials, or network access."
+if [[ "${#ci_skip_notebooks[@]}" -gt 0 ]]; then
+  echo "Only notebooks listed in NOTEBOOK_CI_SKIP_NOTEBOOKS are skipped."
+  echo "Those CI exceptions require large external data files that are not available on GitHub-hosted runners."
+else
+  echo "No notebooks are skipped for data files, checkpoints, GPU availability, credentials, or network access."
+fi
 echo "If a selected notebook requires unavailable resources, that notebook fails this run."
 echo "::endgroup::"
 
