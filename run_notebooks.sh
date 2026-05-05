@@ -125,7 +125,7 @@ is_ci_skipped_notebook() {
   local skipped
 
   for skipped in "${ci_skip_notebooks[@]}"; do
-    if [[ "$path" == "$skipped" ]]; then
+    if [[ "$path" == $skipped ]]; then
       return 0
     fi
   done
@@ -324,7 +324,7 @@ echo "Selection mode: $list_mode"
 
 if [[ "${#ci_skip_notebooks[@]}" -gt 0 ]]; then
   echo "CI notebook exceptions are enabled."
-  echo "Reason: these notebooks require an external data source that is too large for CI."
+  echo "Reason: ${NOTEBOOK_CI_SKIP_REASON:-these notebooks are explicit CI exceptions documented in the workflow.}"
   print_list "Configured CI notebook exceptions" "${ci_skip_notebooks[@]}"
 fi
 
@@ -362,7 +362,7 @@ echo "::group::Notebook execution assumptions"
 echo "Selected notebooks are executed as-is."
 if [[ "${#ci_skip_notebooks[@]}" -gt 0 ]]; then
   echo "Only notebooks listed in NOTEBOOK_CI_SKIP_NOTEBOOKS are skipped."
-  echo "Those CI exceptions require large external data files that are not available on GitHub-hosted runners."
+  echo "CI exception reason: ${NOTEBOOK_CI_SKIP_REASON:-these notebooks are explicit CI exceptions documented in the workflow.}"
 else
   echo "No notebooks are skipped for data files, checkpoints, GPU availability, credentials, or network access."
 fi

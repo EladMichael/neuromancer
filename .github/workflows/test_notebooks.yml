@@ -10,9 +10,13 @@ on:
   workflow_dispatch:
 
 env:
+  NOTEBOOK_CI_SKIP_REASON: >-
+    These explicit CI exceptions either require a 700 MB external data source or
+    are scratch notebooks scheduled to be deleted in a near-future release.
   NOTEBOOK_CI_SKIP_NOTEBOOKS: |
     examples/neural_operators/Part_8_TIDON_HEAT.ipynb
     examples/control/Part_7_TIDON_DPC_HEAT.ipynb
+    examples/ODEs/scratch/*.ipynb
 
 jobs:
   notebooks:
