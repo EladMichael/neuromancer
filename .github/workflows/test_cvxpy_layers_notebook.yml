@@ -17,7 +17,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -27,7 +27,7 @@ jobs:
           python -m pip install --no-cache-dir \
             "cvxpylayers==0.1.8" \
             "cvxpy==1.7.5" \
-            "diffcp==1.0.23"
+            "diffcp==1.1.4"
 
       - name: Diagnostics
         run: |
