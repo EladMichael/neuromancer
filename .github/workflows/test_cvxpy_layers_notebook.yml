@@ -63,6 +63,18 @@ jobs:
           tr '\0' '\n' < "$list_file" | sed 's/^/  /'
 
       - name: Run CVXPY layers notebook
+        env:
+          NOTEBOOK_LOG_DIR: ${{ runner.temp }}/cvxpy-layers-notebook-logs
+          NOTEBOOK_LOG_TAIL_LINES: "300"
         run: |
           set -euo pipefail
+          mkdir -p "$NOTEBOOK_LOG_DIR"
           bash ./run_notebooks.sh ci-kernel . 3600 "${{ steps.notebooks.outputs.list_file }}"
+
+      - name: Upload CVXPY layers notebook logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvxpy-layers-notebook-logs
+          path: ${{ runner.temp }}/cvxpy-layers-notebook-logs
+          if-no-files-found: ignore

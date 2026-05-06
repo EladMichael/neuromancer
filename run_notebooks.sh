@@ -11,9 +11,15 @@ KERNEL="${1:-python3}"
 REPO_DIR="${2:-.}"
 EXEC_TIMEOUT_SECONDS="${3:-3600}"
 NOTEBOOK_LIST_FILE="${4:-}"
+NOTEBOOK_LOG_TAIL_LINES="${NOTEBOOK_LOG_TAIL_LINES:-80}"
 
 if [[ "$EXEC_TIMEOUT_SECONDS" != "-1" && ! "$EXEC_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: EXEC_TIMEOUT_SECONDS must be -1 or a positive integer." >&2
+  exit 2
+fi
+
+if [[ ! "$NOTEBOOK_LOG_TAIL_LINES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: NOTEBOOK_LOG_TAIL_LINES must be a positive integer." >&2
   exit 2
 fi
 
@@ -40,6 +46,10 @@ cleanup() {
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
+
+if [[ -n "${NOTEBOOK_LOG_DIR:-}" ]]; then
+  mkdir -p "$NOTEBOOK_LOG_DIR"
+fi
 
 selected_notebooks=()
 excluded_notebooks=()
@@ -254,11 +264,25 @@ print_summary() {
   echo "::endgroup::"
 }
 
+notebook_log_file() {
+  local notebook="$1"
+  local log_name
+
+  if [[ -n "${NOTEBOOK_LOG_DIR:-}" ]]; then
+    log_name="${notebook//\//__}"
+    printf '%s/%s.log\n' "$NOTEBOOK_LOG_DIR" "$log_name"
+  else
+    printf '%s/nbconvert.log\n' "$TMP_DIR"
+  fi
+}
+
 run_notebook() {
   local notebook="$1"
-  local log_file="$TMP_DIR/nbconvert.log"
   local output_file="$TMP_DIR/nbconvert-output.ipynb"
+  local log_file
   local exit_code
+
+  log_file="$(notebook_log_file "$notebook")"
 
   rm -f "$log_file" "$output_file"
 
@@ -292,14 +316,16 @@ run_notebook() {
   elif [[ "$exit_code" -eq 124 ]] ||
     grep -Eiq "CellTimeoutError|TimeoutError|timed out|Timeout waiting for execute reply|A cell timed out" "$log_file"; then
     echo "TIMEOUT: $notebook"
-    echo "Last 80 log lines:"
-    tail -n 80 "$log_file" || true
+    echo "Full log: $log_file"
+    echo "Last $NOTEBOOK_LOG_TAIL_LINES log lines:"
+    tail -n "$NOTEBOOK_LOG_TAIL_LINES" "$log_file" || true
     timed_out_notebooks+=("$notebook")
   else
     echo "FAIL: $notebook"
     echo "Exit code: $exit_code"
-    echo "Last 80 log lines:"
-    tail -n 80 "$log_file" || true
+    echo "Full log: $log_file"
+    echo "Last $NOTEBOOK_LOG_TAIL_LINES log lines:"
+    tail -n "$NOTEBOOK_LOG_TAIL_LINES" "$log_file" || true
     failed_notebooks+=("$notebook")
   fi
 
