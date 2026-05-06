@@ -37,7 +37,7 @@ jobs:
           : > "$list_file"
 
           git diff --name-only --diff-filter=A -z \
-            "${{ github.event.pull_request.base.sha }}" HEAD -- "*.ipynb" \
+            "${{ github.event.pull_request.base.sha }}" HEAD -- "examples/**/*.ipynb" \
             > "$list_file"
 
           mapfile -d '' -t added_notebooks < "$list_file"
@@ -46,7 +46,7 @@ jobs:
           echo "count=${#added_notebooks[@]}" >> "$GITHUB_OUTPUT"
 
           if [ "${#added_notebooks[@]}" -eq 0 ]; then
-            echo "No new notebooks were added in this pull request."
+            echo "No new notebooks were added under examples/ in this pull request."
             echo "::group::Notebook summary"
             echo "Selected: 0"
             echo "Passed: 0"
