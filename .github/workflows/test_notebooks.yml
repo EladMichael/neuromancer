@@ -11,15 +11,17 @@ on:
 
 env:
   NOTEBOOK_CI_SKIP_REASON: >-
-    These explicit CI exceptions either require a 700 MB external data source or
-    a GPU backend, or are scratch notebooks scheduled to be deleted in a
-    near-future release.
+    These explicit CI exceptions either require a large external data source,
+    network data download, or GPU backend; are scratch notebooks scheduled to be
+    deleted in a near-future release; or are covered by current issue tracking.
   NOTEBOOK_CI_SKIP_NOTEBOOKS: |
+    examples/neural_operators/Part_2_DeepONet_antiderivative_unaligned.ipynb
     examples/neural_operators/Part_8_TIDON_HEAT.ipynb
     examples/control/Part_7_TIDON_DPC_HEAT.ipynb
     examples/ODEs/scratch/*.ipynb
     examples/lightning_integration_examples/*.ipynb
     examples/lightning_integration_examples/other_examples/*.ipynb
+    examples/psl/systems.ipynb
 
 jobs:
   notebooks:

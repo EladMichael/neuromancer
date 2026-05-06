@@ -8,9 +8,10 @@ on:
 
 env:
   NOTEBOOK_CI_SKIP_REASON: >-
-    These explicit CI exceptions require a 700 MB external data source that is
-    not available on GitHub-hosted runners.
+    These explicit CI exceptions require a large external data source or network
+    data download that is not available on GitHub-hosted runners.
   NOTEBOOK_CI_SKIP_NOTEBOOKS: |
+    examples/neural_operators/Part_2_DeepONet_antiderivative_unaligned.ipynb
     examples/neural_operators/Part_8_TIDON_HEAT.ipynb
 
 jobs:
