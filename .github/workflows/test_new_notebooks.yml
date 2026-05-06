@@ -9,7 +9,8 @@ env:
   NOTEBOOK_CI_SKIP_REASON: >-
     These explicit CI exceptions either require a large external data source,
     network data download, or GPU backend; are scratch notebooks scheduled to be
-    deleted in a near-future release; or are covered by current issue tracking.
+    deleted in a near-future release; require a dedicated dependency stack; or
+    are covered by current issue tracking.
   NOTEBOOK_CI_SKIP_NOTEBOOKS: |
     examples/neural_operators/Part_2_DeepONet_antiderivative_unaligned.ipynb
     examples/neural_operators/Part_8_TIDON_HEAT.ipynb
@@ -17,6 +18,7 @@ env:
     examples/ODEs/scratch/*.ipynb
     examples/lightning_integration_examples/*.ipynb
     examples/lightning_integration_examples/other_examples/*.ipynb
+    examples/parametric_programming/Part_5_cvxpy_layers.ipynb
     examples/psl/systems.ipynb
 
 jobs:
@@ -76,7 +78,6 @@ jobs:
           dot -V
           python -m pip install --upgrade pip
           python -m pip install -e ".[examples]" nbconvert jupyter ipykernel
-          python -m pip install --no-cache-dir "cvxpylayers==0.1.9" "cvxpy==1.7.5" "diffcp<1.1"
 
       - name: Diagnostics
         if: steps.detect.outputs.count != '0'
