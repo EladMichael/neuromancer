@@ -74,6 +74,7 @@ jobs:
           dot -V
           python -m pip install --upgrade pip
           python -m pip install -e ".[examples]" nbconvert jupyter ipykernel
+          python -m pip install --no-cache-dir "cvxpylayers==0.1.9" "cvxpy==1.7.5" "diffcp<1.1"
 
       - name: Diagnostics
         if: steps.detect.outputs.count != '0'
