@@ -47,6 +47,10 @@ jobs:
           echo "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME"
           echo "GITHUB_REF=$GITHUB_REF"
           echo "GITHUB_SHA=$GITHUB_SHA"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            echo "PR head=${{ github.event.pull_request.head.sha }}"
+            echo "PR base=${{ github.event.pull_request.base.sha }}"
+          fi
           echo "checked_out=$(git rev-parse HEAD)"
           test -f src/neuromancer/modules/operators.py
           echo "operators.py exists: src/neuromancer/modules/operators.py"

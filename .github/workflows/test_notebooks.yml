@@ -16,6 +16,8 @@ env:
     deleted in a near-future release; require a dedicated dependency stack; or
     are covered by current issue tracking.
   NOTEBOOK_CI_SKIP_NOTEBOOKS: |
+    examples/neural_operators/Part_2_DeepONet_antiderivative_unaligned.ipynb
+    examples/neural_operators/Part_8_TIDON_HEAT.ipynb
     examples/control/Part_7_TIDON_DPC_HEAT.ipynb
     examples/ODEs/scratch/*.ipynb
     examples/lightning_integration_examples/*.ipynb
@@ -56,6 +58,10 @@ jobs:
           echo "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME"
           echo "GITHUB_REF=$GITHUB_REF"
           echo "GITHUB_SHA=$GITHUB_SHA"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            echo "PR head=${{ github.event.pull_request.head.sha }}"
+            echo "PR base=${{ github.event.pull_request.base.sha }}"
+          fi
           echo "checked_out=$(git rev-parse HEAD)"
           test -d src/neuromancer
           echo "src/neuromancer exists"
@@ -97,9 +103,7 @@ jobs:
         run: |
           set -euo pipefail
           list_file="$RUNNER_TEMP/example_notebooks.zlist"
-          find examples \
-            -path "examples/neural_operators" -prune -o \
-            -type f -name "*.ipynb" -print0 \
+          find examples -type f -name "*.ipynb" -print0 \
             | LC_ALL=C sort -z > "$list_file"
 
           mapfile -d '' -t notebooks < "$list_file"
@@ -110,13 +114,8 @@ jobs:
             exit 2
           fi
 
-          if tr '\0' '\n' < "$list_file" | grep -q '^examples/neural_operators/'; then
-            echo "ERROR: examples/neural_operators notebooks leaked into the general notebook list." >&2
-            exit 2
-          fi
-
-          echo "Example notebooks selected from examples/ excluding examples/neural_operators/:"
-          echo "Neural operator notebooks are tested by test_neural_operator_notebooks.yml."
+          echo "Example notebooks selected from examples/:"
+          echo "Neural operator notebooks are also tested by test_neural_operator_notebooks.yml."
           printf '  %s\n' "${notebooks[@]}"
 
       - name: Run notebooks
