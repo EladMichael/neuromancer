@@ -55,6 +55,11 @@ jobs:
           python --version
           python -m pip --version
           python -m pip list
+          python - <<'PY'
+          import neuromancer
+
+          print("neuromancer:", neuromancer.__file__)
+          PY
           echo "::endgroup::"
 
       - name: Register Jupyter kernel
