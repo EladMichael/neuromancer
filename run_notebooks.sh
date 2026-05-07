@@ -281,6 +281,8 @@ run_notebook() {
   local output_file="$TMP_DIR/nbconvert-output.ipynb"
   local log_file
   local exit_code
+  local start_seconds
+  local duration_seconds
 
   log_file="$(notebook_log_file "$notebook")"
 
@@ -289,6 +291,7 @@ run_notebook() {
   echo "::group::Notebook: $notebook"
   echo "Running: $notebook"
 
+  start_seconds=$SECONDS
   set +e
   if [[ "$EXEC_TIMEOUT_SECONDS" == "-1" ]]; then
     jupyter nbconvert \
@@ -309,13 +312,16 @@ run_notebook() {
   fi
   exit_code=$?
   set -e
+  duration_seconds=$((SECONDS - start_seconds))
 
   if [[ "$exit_code" -eq 0 ]]; then
     echo "PASS: $notebook"
+    echo "Duration: ${duration_seconds}s"
     passed_notebooks+=("$notebook")
   elif [[ "$exit_code" -eq 124 ]] ||
     grep -Eiq "CellTimeoutError|TimeoutError|timed out|Timeout waiting for execute reply|A cell timed out" "$log_file"; then
     echo "TIMEOUT: $notebook"
+    echo "Duration: ${duration_seconds}s"
     echo "Full log: $log_file"
     echo "Last $NOTEBOOK_LOG_TAIL_LINES log lines:"
     tail -n "$NOTEBOOK_LOG_TAIL_LINES" "$log_file" || true
@@ -323,6 +329,7 @@ run_notebook() {
   else
     echo "FAIL: $notebook"
     echo "Exit code: $exit_code"
+    echo "Duration: ${duration_seconds}s"
     echo "Full log: $log_file"
     echo "Last $NOTEBOOK_LOG_TAIL_LINES log lines:"
     tail -n "$NOTEBOOK_LOG_TAIL_LINES" "$log_file" || true
