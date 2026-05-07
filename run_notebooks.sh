@@ -313,6 +313,7 @@ run_notebook() {
   exit_code=$?
   set -e
   duration_seconds=$((SECONDS - start_seconds))
+  rm -f "$output_file"
 
   if [[ "$exit_code" -eq 0 ]]; then
     echo "PASS: $notebook"

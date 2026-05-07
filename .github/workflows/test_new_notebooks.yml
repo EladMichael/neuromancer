@@ -6,14 +6,6 @@ on:
       - develop
 
 env:
-  PYTHONPATH: ${{ github.workspace }}/src
-  OMP_NUM_THREADS: "2"
-  OPENBLAS_NUM_THREADS: "2"
-  MKL_NUM_THREADS: "2"
-  NUMEXPR_NUM_THREADS: "2"
-  VECLIB_MAXIMUM_THREADS: "2"
-  TOKENIZERS_PARALLELISM: "false"
-  MPLBACKEND: "Agg"
   NOTEBOOK_CI_SKIP_REASON: >-
     These explicit CI exceptions either require a large external data source,
     network data download, or GPU backend; are scratch notebooks scheduled to be
