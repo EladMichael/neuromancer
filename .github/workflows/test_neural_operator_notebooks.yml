@@ -7,6 +7,14 @@ on:
   workflow_dispatch:
 
 env:
+  PYTHONPATH: ${{ github.workspace }}/src
+  OMP_NUM_THREADS: "2"
+  OPENBLAS_NUM_THREADS: "2"
+  MKL_NUM_THREADS: "2"
+  NUMEXPR_NUM_THREADS: "2"
+  VECLIB_MAXIMUM_THREADS: "2"
+  TOKENIZERS_PARALLELISM: "false"
+  MPLBACKEND: "Agg"
   NOTEBOOK_CI_SKIP_REASON: >-
     These explicit CI exceptions require a large external data source or network
     data download that is not available on GitHub-hosted runners.
