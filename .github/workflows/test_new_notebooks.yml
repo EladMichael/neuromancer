@@ -104,6 +104,18 @@ jobs:
 
       - name: Run added notebooks
         if: steps.detect.outputs.count != '0'
+        env:
+          NOTEBOOK_LOG_DIR: ${{ runner.temp }}/new-notebook-logs
+          NOTEBOOK_LOG_TAIL_LINES: "300"
         run: |
           set -euo pipefail
+          mkdir -p "$NOTEBOOK_LOG_DIR"
           bash ./run_notebooks.sh ci-kernel . 3600 "${{ steps.detect.outputs.list_file }}"
+
+      - name: Upload added-notebook logs
+        if: always() && steps.detect.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-notebook-logs
+          path: ${{ runner.temp }}/new-notebook-logs
+          if-no-files-found: ignore
