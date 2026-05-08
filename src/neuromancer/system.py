@@ -160,7 +160,6 @@ class System(nn.Module):
         self.system_graph = self.graph()
 
     def graph(self):
-        self._check_unique_names()
         graph = pydot.Dot("problem", graph_type="digraph",
                           splines="spline", rankdir="LR")
         graph.add_node(pydot.Node("in", label="dataset", color='skyblue',
@@ -176,10 +175,14 @@ class System(nn.Module):
             if node.name is None or node.name == '':
                 node.name = f'node_{nonames}'
                 nonames += 1
+
+        self._check_unique_names()
+        for node in self.nodes:
             sim_loop.add_node(pydot.Node(node.name, label=node.name,
                                          color='lavender',
                                          style='filled',
                                          shape="box"))
+
         graph.add_node(pydot.Node('out', label='out',
                                   color='skyblue', style='filled', shape='box'))
         graph.add_subgraph(sim_loop)
@@ -253,9 +256,12 @@ class System(nn.Module):
             plt.show()
 
     def _check_unique_names(self):
-        num_unique = len(set([node.name for node in self.nodes]))
-        num_comp = len(self.nodes)
-        assert num_unique == num_comp, \
+        names = [
+            node.name for node in self.nodes
+        ]
+        num_unique = len(set(names))
+        num_total = len(names)
+        assert num_unique == num_total, \
             "All system nodes must have unique names " \
             "to construct a computational graph."
 
