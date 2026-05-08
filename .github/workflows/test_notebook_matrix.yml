@@ -1,9 +1,6 @@
 name: Test Notebook Folder Matrix
 
 on:
-  pull_request:
-    branches:
-      - develop
   push:
     branches:
       - develop

@@ -1,9 +1,6 @@
 name: Run Remaining Notebook Tests
 
 on:
-  pull_request:
-    branches:
-      - develop
   push:
     branches:
       - develop
