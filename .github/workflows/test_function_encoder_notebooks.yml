@@ -1,4 +1,4 @@
-name: Run Remaining Notebook Tests
+name: Test Function Encoder Notebooks
 
 on:
   pull_request:
@@ -99,36 +99,27 @@ jobs:
           python -m ipykernel install --user --name=ci-kernel
           jupyter kernelspec list
 
-      - name: Select remaining example notebooks
+      - name: Select function encoder notebooks
         id: notebooks
         shell: bash
         run: |
           set -euo pipefail
-          list_file="$RUNNER_TEMP/example_notebooks.zlist"
-          find examples -type f -name "*.ipynb" \
-            ! -path "examples/control/*" \
-            ! -path "examples/domain_examples/*" \
-            ! -path "examples/ODEs/*" \
-            ! -path "examples/PDEs/*" \
-            ! -path "examples/function_encoder/*" \
-            ! -path "examples/neural_operators/*" \
-            ! -path "examples/parametric_programming/*" \
-            -print0 \
+          list_file="$RUNNER_TEMP/function_encoder_notebooks.zlist"
+          find examples/function_encoder -type f -name "*.ipynb" -print0 \
             | LC_ALL=C sort -z > "$list_file"
 
           mapfile -d '' -t notebooks < "$list_file"
           echo "list_file=$list_file" >> "$GITHUB_OUTPUT"
 
           if [ "${#notebooks[@]}" -eq 0 ]; then
-            echo "ERROR: no remaining notebooks found under examples/." >&2
+            echo "ERROR: no notebooks found under examples/function_encoder/." >&2
             exit 2
           fi
 
-          echo "Remaining example notebooks selected from examples/:"
-          echo "Dedicated workflows test examples/control, examples/domain_examples, examples/ODEs, examples/PDEs, examples/function_encoder, examples/neural_operators, and examples/parametric_programming."
+          echo "Function encoder notebooks selected from examples/function_encoder/:"
           printf '  %s\n' "${notebooks[@]}"
 
-      - name: Run notebooks
+      - name: Run function encoder notebooks
         env:
           PYTHONPATH: ${{ github.workspace }}/src
           NOTEBOOK_LOG_TAIL_LINES: "300"
