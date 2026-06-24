@@ -45,12 +45,13 @@ dependencies = [
     "pyts",
     "torch",
     "torchdiffeq",
-    "toml", 
-    "lightning", 
-    "cvxpy", 
-    "cvxpylayers", 
+    "toml",
+    "lightning",
+    "cvxpy",
+    "cvxpylayers",
     "casadi",
-    "torchsde"
+    "torchsde",
+    "beartype",
 ]
 
 [project.urls]
