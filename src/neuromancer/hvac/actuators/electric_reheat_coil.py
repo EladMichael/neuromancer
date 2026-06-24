@@ -15,12 +15,7 @@ ZONE VECTORIZATION SUPPORT:
 import torch
 from .actuator import Actuator
 from typing import Literal, Union, List
-import os
-if os.environ.get("RUNTIME_TYPING", 1):
-    from beartype import beartype
-else:
-    # passthrough for no type checking
-    def beartype(fn): return fn
+from .._runtime import beartype
 
 
 class ElectricReheatCoil(Actuator):
@@ -124,9 +119,9 @@ class ElectricReheatCoil(Actuator):
             # Time for actuator to reach 63% of final position after step input
             # Electric contactors: 5-10 s, SCR control: 8-15 s, Transformers: 10-20 s
 
-            actuator_model: str = "smooth_approximation",
+            actuator_model: str = "analytic",
             # Actuator dynamics model type
-            # Options: "instantaneous", "odesolve", "analytic", "smooth_approximation"
+            # Options: "instantaneous", "analytic"
             # Inherited from Actuator base class
     ):
         """

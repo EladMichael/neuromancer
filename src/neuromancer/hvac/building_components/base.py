@@ -39,12 +39,7 @@ import copy
 
 from ..simulation_inputs.schedules import stochastic_variation, persistent_excitation
 from ..context import MILD_COOLING_CONTEXT
-import os
-if os.environ.get("RUNTIME_TYPING", 1):
-    from beartype import beartype
-else:
-    # passthrough for no type checking
-    def beartype(fn): return fn
+from .._runtime import beartype
 
 
 class BuildingComponent(nn.Module, ABC):
@@ -62,6 +57,12 @@ class BuildingComponent(nn.Module, ABC):
         - _param_ranges:       Model parameters (fixed or learnable).
         - _zone_param_ranges:   Model parameters (fixed or learnable).
 
+    Sys-ID and control need to tell apart the externals you *command* from the ones
+    the *world imposes*. ``_control_ranges`` / ``_disturbance_ranges`` tag that split
+    as a subset of ``_external_ranges`` (the union stays intact, so anything reading
+    externals is unaffected). Externals that are neither — fed-back couplings from
+    another component's state, e.g. an RTU's ``T_return`` — are left untagged.
+
     These dictionaries serve two primary purposes:
         1. Validation: Physical/engineering range checking for simulation health and diagnostics.
         2. Automated wiring: Used by factories or system composition tools to:
@@ -70,6 +71,8 @@ class BuildingComponent(nn.Module, ABC):
     """
     _state_ranges = {}
     _external_ranges = {}
+    _control_ranges = {}
+    _disturbance_ranges = {}
     _param_ranges = {}
     _zone_param_ranges = {}
     _output_ranges = {}
@@ -111,22 +114,15 @@ class BuildingComponent(nn.Module, ABC):
 
     @property
     def variable_ranges(self):
-        if not hasattr(self, '_user_variable_ranges') or not self._user_variable_ranges:
-            # No user overrides - return default structure directly
-            return {
-                "state": self._state_ranges,
-                "external": self._external_ranges,
-                "param": self._param_ranges,
-                "zone_param": self._zone_param_ranges,
-                "output": self._output_ranges,
-            }
-
-        merged = copy.deepcopy(self._variable_ranges)
-        for key, override in self._user_variable_ranges.items():
-            if key in merged:
-                merged[key].update(override)
-            else:
-                merged[key] = override
+        merged = {
+            "state": copy.deepcopy(self._state_ranges),
+            "external": copy.deepcopy(self._external_ranges),
+            "param": copy.deepcopy(self._param_ranges),
+            "zone_param": copy.deepcopy(self._zone_param_ranges),
+            "output": copy.deepcopy(self._output_ranges),
+        }
+        for key, override in getattr(self, "_user_variable_ranges", {}).items():
+            merged.setdefault(key, {}).update(override)
         return merged
 
     @variable_ranges.setter
@@ -155,12 +151,46 @@ class BuildingComponent(nn.Module, ABC):
     def initial_state_functions(self):
         return {}
 
+    @property
+    def is_dynamical(self) -> bool:
+        """True if the component carries state (``forward`` is a state transition),
+        False if it is a memoryless algebraic map (e.g. ``StagedDXPlant``)."""
+        return bool(self._state_ranges)
+
+    @property
+    def state_widths(self) -> dict:
+        """
+        Width (last-dim size) of each state in ``_state_ranges``. Defaults to 1 per
+        state; components with zone-vectorized states override this. Used by
+        ``state_vector`` / ``from_state_vector`` to pack and unpack a flat state.
+        """
+        return {name: 1 for name in self._state_ranges}
+
+    def state_vector(self, outputs: dict) -> torch.Tensor:
+        """
+        Pack a forward()-output dict into a flat state tensor [batch, n_state],
+        ordered by ``_state_ranges`` insertion order. Lets adapters/composites
+        carry the state as one tensor without relying on dict iteration order.
+        """
+        return torch.cat([outputs[k] for k in self._state_ranges], dim=-1)
+
+    def from_state_vector(self, vec: torch.Tensor) -> dict:
+        """
+        Inverse of ``state_vector``: split a flat [batch, n_state] tensor back into
+        a ``{state_name: [batch, width]}`` dict using ``state_widths``.
+        """
+        states, offset = {}, 0
+        for name, width in self.state_widths.items():
+            states[name] = vec[..., offset:offset + width]
+            offset += width
+        return states
+
     def simulate(
             self,
             # Time and simulation control
             t_duration: float = 86400.0,  # Simulation duration in seconds
             t_dt: float = 300.0,  # Time step in seconds (5 minute default)
-            t_start: float = 18000.0,  # Start time in seconds (default 5 AM)
+            t_start: float = None,  # Start time [s from epoch]; defaults to context["t_context"]
             batch_size: int = 1,  # Number of parallel simulations
 
             # State and input control
@@ -203,7 +233,11 @@ class BuildingComponent(nn.Module, ABC):
             results = component.simulate(t_duration=43200, batch_size=10)
         """
 
-        self.dt = t_dt  # Convert minutes to seconds
+        # Time-of-year/day for the run comes from the context, not a magic number.
+        if t_start is None:
+            t_start = self.context["t_context"]
+
+        self.dt = t_dt
         self.batch_size = batch_size
         n_steps = int(t_duration / self.dt)
 
@@ -243,6 +277,11 @@ class BuildingComponent(nn.Module, ABC):
         for k, v_list in log.items():
             stacked = torch.stack(v_list, dim=0)  # [time_steps, batch_size, dim]
             results[k] = stacked.transpose(0, 1)  # [batch_size, time_steps, dim]
+
+        # Absolute time axis [s from epoch] for the logged frames (initial + n_steps),
+        # so results carry their own time vector (used by plotting/analysis).
+        times = t_start + self.dt * torch.arange(n_steps + 1, device=self.device, dtype=self.dtype)
+        results["t"] = times.reshape(1, -1, 1).expand(batch_size, -1, 1).clone()
         return results
 
     def build_input_functions(

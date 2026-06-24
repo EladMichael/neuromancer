@@ -15,12 +15,7 @@ ZONE VECTORIZATION SUPPORT:
 import torch
 from .actuator import Actuator
 from typing import Literal, Union, List
-import os
-if os.environ.get("RUNTIME_TYPING", 1):
-    from beartype import beartype
-else:
-    # passthrough for no type checking
-    def beartype(fn): return fn
+from .._runtime import beartype
 
 
 class Damper(Actuator):
@@ -118,9 +113,9 @@ class Damper(Actuator):
             # Time for actuator to reach 63% of final position after step input
             # Electric actuators: 3-10 s, Pneumatic: 8-15 s
 
-            actuator_model: str = "smooth_approximation",
+            actuator_model: str = "analytic",
             # Actuator dynamics model type
-            # Options: "instantaneous", "analytic", "smooth_approximation"
+            # Options: "instantaneous", "analytic"
             # Inherited from Actuator base class
     ):
         """
@@ -162,10 +157,13 @@ class Damper(Actuator):
 
         Returns:
             torch.Tensor: Required damper position [0-1], shape [batch_size, n_zones]
+
+        Note:
+            This inverse intentionally ignores duct_pressure (it is the controller's
+            position command at nominal conditions). position_to_airflow applies the
+            pressure correction to the *delivered* flow, so off-nominal pressure shows
+            up as a realistic tracking offset rather than being silently cancelled.
         """
-
-        print("This function currently takes pressure and doesn't use it!")
-
         # Normalize airflow to fraction of maximum capacity
         # Broadcasting: [batch_size, n_zones] / [n_zones] -> [batch_size, n_zones]
         flow_fraction = target_airflow / self.max_airflow
@@ -231,19 +229,16 @@ class Damper(Actuator):
         # Broadcasting: [batch_size, n_zones] * [n_zones] -> [batch_size, n_zones]
         base_airflow = flow_fraction * self.max_airflow
 
-        # Apply pressure correction if duct pressure varies from nominal
-        assert duct_pressure, "Why are we calculating this if we don't know duct pressure? Just pass it, if it's nominal! Let me know!"
-        # if duct_pressure is not None:
-        
+        # Apply pressure correction. Duct pressure is required: callers must pass it
+        # explicitly (use nominal_pressure if that is genuinely the operating point).
+        assert duct_pressure is not None, "position_to_airflow requires duct_pressure"
+
         # Theoretical relationship: Q ∝ √ΔP (orifice flow equation)
         # Broadcasting: [batch_size, n_zones or 1] / [n_zones or scalar] -> [batch_size, n_zones]
         pressure_factor = torch.sqrt(duct_pressure / self.nominal_pressure)
         # Clamp to reasonable range to prevent unrealistic flows
         pressure_factor = torch.clamp(pressure_factor, 0.5, 2.0)
         airflow = base_airflow * pressure_factor
-        
-        # else:
-        #     airflow = base_airflow
 
         return airflow
 

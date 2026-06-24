@@ -14,15 +14,37 @@ ZONE VECTORIZATION SUPPORT:
 
 import torch
 import numpy as np
-from torchdiffeq import odeint
 import neuromancer.hvac.simclock as simclock
 from .base import BuildingComponent
-import os
-if os.environ.get("RUNTIME_TYPING", 1):
-    from beartype import beartype 
-else:
-    # passthrough for no type checking
-    def beartype(fn): return fn
+from .._runtime import beartype
+
+
+def rk4_step(deriv, y, dt, n_substeps=1):
+    """
+    Fixed-step classical RK4 integration of dy/dt = deriv(y) over a span `dt`.
+
+    Exogenous inputs are held constant across the span (zero-order hold), so `deriv`
+    is a pure function of the state. For building RC dynamics the step `dt` (minutes)
+    is far below the thermal time constants (hours), so a single substep is accurate;
+    increase `n_substeps` if integrating with very large `dt`.
+
+    Args:
+        deriv: callable(y) -> dy/dt, same shape as y.
+        y: state tensor.
+        dt: total integration span [s].
+        n_substeps: number of equal RK4 substeps over the span.
+
+    Returns:
+        State tensor after `dt`.
+    """
+    h = dt / n_substeps
+    for _ in range(n_substeps):
+        k1 = deriv(y)
+        k2 = deriv(y + 0.5 * h * k1)
+        k3 = deriv(y + 0.5 * h * k2)
+        k4 = deriv(y + h * k3)
+        y = y + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    return y
 
 
 class Envelope(BuildingComponent):
@@ -44,20 +66,19 @@ class Envelope(BuildingComponent):
 
     External Inputs (shape [batch_size, n_zones] unless noted):
         - T_outdoor: Outdoor air temperature [K] (can be [batch_size, 1] for broadcast)
-        - Q_solar: Solar heat gain per zone [W]
-        - Q_internal: Internal heat gains from occupancy and equipment [W]
+        - irradiance: Solar irradiance [W/m^2] (driving signal; -> solar heat via solar_gain)
+        - occupancy: Occupancy signal [-] (driving signal; -> internal heat via internal_gain)
         - Q_hvac: HVAC heat input/output per zone [W] (negative=cooling, positive=heating)
 
     Zone-Specific Parameters (expandable to [n_zones] vectors):
         - R_env: Envelope thermal resistance per zone [K/W]
         - C_env: Thermal capacitance per zone [J/K]
+        - solar_gain: Irradiance->Watts coupling per zone [W/(W/m^2)] = effective aperture (area*SHGC)
+        - internal_gain: Occupancy->Watts coupling per zone [W per unit occupancy]
 
     Shared Parameters (scalars):
         - R_internal: Inter-zone thermal resistance [K/W]
         - adjacency_threshold: Threshold for discretizing learned topology [0-1]
-        - ode_method: ODE integration method (e.g., 'dopri5', 'rk4')
-        - ode_rtol: Relative tolerance for ODE solver
-        - ode_atol: Absolute tolerance for ODE solver
 
     Primary Outputs (shape [batch_size, n_zones]):
         - T_zones: Zone air temperatures after dynamics integration [K]
@@ -72,12 +93,11 @@ class Envelope(BuildingComponent):
         - Heat exchange with ambient environment through envelope resistance
         - Inter-zone heat transfer through internal resistance matrix
         - Optional learnable adjacency matrix for zone connectivity topology
-        - Internal ODE integration handles temperature dynamics automatically
+        - Internal fixed-step RK4 integration handles temperature dynamics
 
-    ODE Integration:
-        - Uses torchdiffeq for robust numerical integration
-        - Configurable solver method and tolerances
-        - Integration performed internally during each forward() call
+    Integration:
+        - Fixed-step classical RK4 over each forward() step (see rk4_step / rk4_substeps)
+        - Exogenous inputs held constant across the step (zero-order hold)
         - Time step dt provided as input to forward() method
 
     Units:
@@ -99,41 +119,59 @@ class Envelope(BuildingComponent):
     }
     _external_ranges = {
         "T_outdoor": (253.15, 318.15),  # [K] Outdoor air temperature
-        "Q_solar": (0.0, 2000.0),  # [W] Solar heat gain per zone
-        "Q_internal": (0.0, 2000.0),  # [W] Internal heat gain per zone
+        "irradiance": (0.0, 1200.0),  # [W/m^2] Solar irradiance driving solar gain
+        "occupancy": (0.0, 1.0),  # [-] Occupancy signal driving internal gain
         "Q_hvac": (-5000.0, 5000.0),  # [W] HVAC heat/cool addition per zone
     }
+    # U/D split of the externals (subset tags; the union above is unchanged).
+    _disturbance_ranges = {
+        "T_outdoor": (253.15, 318.15),
+        "irradiance": (0.0, 1200.0),
+        "occupancy": (0.0, 1.0),
+    }
+    _control_ranges = {"Q_hvac": (-5000.0, 5000.0)}  # HVAC actuation
     _zone_param_ranges = {
         # Zone-specific parameters (expanded to [n_zones] vectors)
         "R_env": (0.05, 2.0),  # [K/W] Envelope resistance per zone
         "C_env": (1e5, 5e7),   # [J/K] Envelope capacitance per zone
+        # Disturbance->heat couplings (the grey-box "B matrix"), per zone. These map
+        # the raw measured signals to Watts; you never measure gains in Watts directly.
+        "solar_gain": (0.0, 50.0),     # [W/(W/m^2)] effective aperture (area * SHGC)
+        "internal_gain": (0.0, 5000.0),  # [W per unit occupancy]
     }
     _param_ranges = {
         # Shared parameters (scalars)
         "R_internal": (0.01, 1.0),      # [K/W] Inter-zone resistance
         "adjacency_threshold": (0.0, 1.0),  # [0-1] Threshold for adjacency
-        # ODE solver parameters
-        "ode_rtol": (1e-8, 1e-3),  # Relative tolerance
-        "ode_atol": (1e-10, 1e-5), # Absolute tolerance
     }
+
+    # Number of fixed RK4 substeps per forward() step. 1 is accurate for typical
+    # building dt (minutes) vs thermal time constants (hours); override per-instance
+    # if you integrate with very large dt.
+    rk4_substeps = 1
+
+    @property
+    def state_widths(self) -> dict:
+        """T_zones is the per-zone temperature vector, width n_zones."""
+        return {"T_zones": self.n_zones}
 
     @beartype
     def __init__(
             self,
-            n_zones: int = 1,
+            n_zones: int,  # building geometry: number of zones (no default)
             # Zone-specific parameters (can be scalar or list[n_zones])
             R_env: float | list = 0.1,     # [K/W] Envelope resistance per zone
             C_env: float | list = 1e6,     # [J/K] Thermal capacitance per zone
+            # Disturbance->heat couplings (grey-box B), per zone, learnable
+            solar_gain: float | list = 3.0,        # [W/(W/m^2)] effective aperture (area*SHGC)
+            internal_gain: float | list = 800.0,   # [W per unit occupancy]
             # Shared parameters
             R_internal: float | list | np.ndarray | torch.Tensor = 0.02,  # [K/W] Inter-zone resistances
             adjacency_threshold: float = 0.5,  # [0-1] Adjacency threshold
-            # ODE solver parameters
-            ode_method: str = 'dopri5',  # ODE integration method
-            ode_rtol: float = 1e-5,      # Relative tolerance
-            ode_atol: float = 1e-7,      # Absolute tolerance
             # Special adjacency matrix parameter
             adjacency: list | np.ndarray | torch.Tensor = None,  # [n_zones, n_zones] Zone connectivity
             # Standard parameters
+            context: dict = None,  # Building operating context (scenario) for init/inputs
             learnable: set = None,
             device: torch.device = None,
             dtype: torch.dtype = torch.float32,
@@ -156,10 +194,6 @@ class Envelope(BuildingComponent):
                 Controls heat transfer rate between adjacent zones.
             adjacency_threshold (float): Threshold for discretizing learned adjacency matrix [0-1].
                 Used during evaluation to convert continuous connectivity to discrete.
-            ode_method (str): ODE integration method for temperature dynamics.
-                Options: 'dopri5' (adaptive), 'rk4' (fixed), 'euler' (simple).
-            ode_rtol (float): Relative tolerance for ODE solver accuracy.
-            ode_atol (float): Absolute tolerance for ODE solver accuracy.
             adjacency (Tensor, optional): Initial zone connectivity matrix [n_zones, n_zones].
                 If None, defaults to all zones connected (except self-connections).
             learnable (dict): Parameters to make learnable for optimization/learning applications.
@@ -243,20 +277,17 @@ class Envelope(BuildingComponent):
     @property
     def R_internal_matrix(self) -> torch.Tensor:
         """
-        Get resistance matrix
+        Get the (n_zones, n_zones) inter-zone resistance matrix.
+
+        Stored as log-resistances so the exponential guarantees positivity. The
+        diagonal is irrelevant to the dynamics (the i==i temperature difference is
+        zero and the adjacency diagonal is zero), so it is returned as-is.
 
         Returns:
-            Tensor: Full resistance matrix (n_zones, n_zones) with zeros on diagonal.
-                   All resistance values are guaranteed positive.
+            Tensor: Resistance matrix (n_zones, n_zones), all entries positive [K/W].
         """
-        
-        # Exponential ensures positive resistances
-        R_values = torch.exp(self.R_internal_logits)
-        # Create full matrix with this resistance value
-        R_matrix = torch.full((self.n_zones, self.n_zones), R_values.item(),
-                              device=self.device, dtype=self.dtype)
-        R_matrix.fill_diagonal_(0)  # No self-connections
-        return R_matrix
+        # Exponential ensures positive resistances; preserves the full per-pair matrix.
+        return torch.exp(self.R_internal_logits)
 
     @property
     def adjacency_matrix(self) -> torch.Tensor:
@@ -279,35 +310,32 @@ class Envelope(BuildingComponent):
             return torch.sigmoid(self.adj_logits)
 
     @beartype
-    def ode_rhs(
+    def _dT_dt(
             self,
-            t: float,  # [s] Current simulation time
             T_zones: torch.Tensor,  # [K] Zone temperatures, shape [batch_size, n_zones]
+            T_outdoor: torch.Tensor,  # [K] Outdoor temperature, [batch_size, 1] or [batch_size, n_zones]
+            irradiance: torch.Tensor,  # [W/m^2] Solar irradiance, [batch_size, 1] or [batch_size, n_zones]
+            occupancy: torch.Tensor,  # [-] Occupancy signal, [batch_size, 1] or [batch_size, n_zones]
+            Q_hvac: torch.Tensor,  # [W] HVAC input, shape [batch_size, n_zones]
     ) -> torch.Tensor:
         """
-        Calculate temperature derivatives for ODE integration (internal physics computation).
+        Zone temperature derivatives for RC-network thermal dynamics.
 
-        Computes dT/dt for each zone based on RC network thermal dynamics including:
-        - Heat exchange with ambient environment through envelope resistance
-        - Inter-zone heat transfer through internal resistance matrix
-        - Heat inputs from solar, internal, and HVAC sources
-
-        Args:
-            t (float): Current simulation time [s].
-            T_zones (Tensor): Zone temperatures [K], shape [batch_size, n_zones].
+        Pure function of the state given the (held-constant) exogenous inputs, so it
+        can be called repeatedly by the RK4 integrator. Includes:
+        - Heat exchange with ambient through envelope resistance
+        - Inter-zone heat transfer through the internal resistance matrix
+        - Solar/internal heat from measured signals via learnable per-zone gains
+        - HVAC heat input
 
         Returns:
             Tensor: Temperature derivatives [K/s], shape [batch_size, n_zones].
         """
-        # Use stored inputs from current forward() call
-        T_outdoor = self.current_inputs['T_outdoor']
-        Q_solar = self.current_inputs['Q_solar']
-        Q_internal = self.current_inputs['Q_internal']
-        Q_hvac = self.current_inputs['Q_hvac']
-
-        # # Ensure T_outdoor broadcasts properly - expand if needed
-        # if T_outdoor.shape[-1] == 1:
-        #     T_outdoor = T_outdoor.clone.expand_as(T_zones)
+        # Measured disturbances -> heat via learnable per-zone gains (grey-box B).
+        # Clamp the gains non-negative: irradiance and occupancy can only add heat.
+        # Broadcasting: [batch_size, 1] * [n_zones] -> [batch_size, n_zones]
+        Q_solar = irradiance * self.solar_gain.clamp(min=0.0)
+        Q_internal = occupancy * self.internal_gain.clamp(min=0.0)
 
         # Envelope heat exchange with ambient
         # Q_env_exchange: [W] = ([K] - [K]) / [K/W] = [W]
@@ -343,8 +371,8 @@ class Envelope(BuildingComponent):
             t: float,  # [s] Current simulation time
             T_zones: torch.Tensor, # [K] Zone temperatures, shape[batch_size, n_zones]
             T_outdoor: torch.Tensor,  # [K] Outdoor temperature, [batch_size, 1]
-            Q_solar: torch.Tensor,  # [W] Solar gains, shape [batch_size, n_zones]
-            Q_internal: torch.Tensor,  # [W] Internal gains, shape [batch_size, n_zones]
+            irradiance: torch.Tensor,  # [W/m^2] Solar irradiance, [batch_size, 1]
+            occupancy: torch.Tensor,  # [-] Occupancy signal, [batch_size, 1]
             Q_hvac: torch.Tensor,  # [W] HVAC input, shape [batch_size, n_zones]
             dt: float = 1.0,  # [s] Time step for integration
     ) -> dict:
@@ -369,39 +397,23 @@ class Envelope(BuildingComponent):
         Args:
             t (float): Current simulation time [s].
             T_outdoor (Tensor): Outdoor air temperatures [K], shape [batch_size, n_zones] or [batch_size, 1].
-            Q_solar (Tensor): Solar heat gains [W], shape [batch_size, n_zones].
-            Q_internal (Tensor): Internal heat gains [W], shape [batch_size, n_zones].
+            irradiance (Tensor): Solar irradiance [W/m^2], shape [batch_size, 1] or [batch_size, n_zones].
+            occupancy (Tensor): Occupancy signal [-], shape [batch_size, 1] or [batch_size, n_zones].
             Q_hvac (Tensor): HVAC heat input/output [W], shape [batch_size, n_zones].
-            dt (float): Time step [s] for ODE integration.
+            dt (float): Time step [s] for integration.
 
         Returns:
             dict: Updated zone temperatures and diagnostics, all tensors shape [batch_size, n_zones].
                 T_zones: Zone temperatures after dynamics integration [K]
         """
-        # Store current inputs for use in ode_rhs
-        self.current_inputs = {
-            'T_outdoor': T_outdoor,
-            'Q_solar': Q_solar,
-            'Q_internal': Q_internal,
-            'Q_hvac': Q_hvac,
-        }
+        # Exogenous inputs are held constant across the step (zero-order hold), so the
+        # derivative is a pure function of the zone temperatures for the RK4 integrator.
+        def deriv(T):
+            return self._dT_dt(T, T_outdoor, irradiance, occupancy, Q_hvac)
 
-        # Integrate over the time step
-        t_span = torch.tensor([t, t + dt], device=self.device, dtype=self.dtype)
-
-        # ODE integration
-        solution = odeint(
-            func=lambda time, states: self.ode_rhs(float(time), states),
-            y0=T_zones,
-            t=t_span,
-            method=self.ode_method,
-            rtol=self.ode_rtol,
-            atol=self.ode_atol,
-        )
-
-        # Extract final temperatures
+        T_new = rk4_step(deriv, T_zones, dt, n_substeps=self.rk4_substeps)
         return {
-            "T_zones": solution[-1],
+            "T_zones": T_new,
         }
 
     @beartype
@@ -477,8 +489,8 @@ class Envelope(BuildingComponent):
             occupancy_state = self.context.get("occupancy_state")
             system_mode = self.context.get("system_mode")
 
-            def Q_solar_fn(t, batch_size=1):
-                """Context-aware solar heat gain with realistic daily and seasonal patterns."""
+            def irradiance_fn(t, batch_size=1):
+                """Context-aware solar irradiance [W/m^2] with daily/seasonal pattern."""
                 h_of_day = simclock.hour_of_day(t)
                 d_of_year = simclock.day_of_year(t)
                 # Daily solar pattern (zero at night, peak at solar noon)
@@ -490,33 +502,24 @@ class Envelope(BuildingComponent):
                 # Seasonal variation (stronger in summer, weaker in winter)
                 seasonal_factor = 1.0 + 0.5 * torch.sin(torch.tensor(2 * torch.pi * (d_of_year - 80) / 365))
 
-                # Weather factor from context affects solar intensity
+                # Weather factor from context affects clear-sky fraction
                 weather_factor = self.context.get("weather_factor", 0.7)
 
-                # Base solar gain scaled by daily, seasonal, and weather patterns
-                solar_gain = 200.0 * daily_solar * seasonal_factor * weather_factor  # [W] per zone
-                return torch.full((batch_size, self.n_zones), solar_gain,
+                # Peak clear-sky irradiance ~900 W/m^2 scaled by daily/seasonal/weather
+                irradiance = 900.0 * daily_solar * seasonal_factor * weather_factor  # [W/m^2]
+                return torch.full((batch_size, 1), float(irradiance),
                                   device=self.device, dtype=self.dtype)
 
-            def Q_internal_fn(t, batch_size=1):
-                """Context-aware internal heat gains based on occupancy state and schedule."""
+            def occupancy_fn(t, batch_size=1):
+                """Context-aware occupancy signal [0-1] from the building schedule."""
                 h_of_day = simclock.hour_of_day(t)
-
                 if occupancy_state == "occupied":
-                    # Full occupancy schedule
-                    if 8 <= h_of_day <= 17:  # Business hours
-                        internal_gain = 1200.0  # Full occupancy [W]
-                    elif 7 <= h_of_day < 8 or 17 < h_of_day <= 19:  # Transition hours
-                        internal_gain = 700.0  # Partial occupancy [W]
-                    else:
-                        internal_gain = 250.0  # Night: minimal loads [W]
+                    occ = 1.0 if 8 <= h_of_day <= 18 else 0.0
                 elif occupancy_state == "unoccupied":
-                    # Building unoccupied - minimal equipment loads only
-                    internal_gain = 150.0  # [W]
-                else:  # "transition" - building startup
-                    # Moderate gains during startup period
-                    internal_gain = 500.0  # [W]
-                return torch.full((batch_size, self.n_zones), internal_gain,
+                    occ = 0.0
+                else:  # "transition" - partial
+                    occ = 0.5
+                return torch.full((batch_size, 1), occ,
                                   device=self.device, dtype=self.dtype)
 
             def Q_hvac_fn(t, batch_size=1):
@@ -565,13 +568,13 @@ class Envelope(BuildingComponent):
                 daily_temp = daily_amplitude * np.sin(2 * np.pi * (h_of_day - peak_hour) / 24)
                 seasonal_temp = seasonal_amplitude * np.sin(2 * np.pi * (d_of_year - 80) / 365)
                 total_temp = base_temp + daily_temp + seasonal_temp
-                total_temp = torch.full((batch_size, 1), total_temp)
-                return total_temp
+                return torch.full((batch_size, 1), float(total_temp),
+                                  device=self.device, dtype=self.dtype)
 
             self._input_functions = {
                 "T_outdoor": T_outdoor_fn,
-                "Q_solar": Q_solar_fn,
-                "Q_internal": Q_internal_fn,
+                "irradiance": irradiance_fn,
+                "occupancy": occupancy_fn,
                 "Q_hvac": Q_hvac_fn,
             }
 

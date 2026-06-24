@@ -9,15 +9,10 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 from typing import Dict, List, Tuple, Optional, Union
 from math import floor
-from neuromancer.hvac.building_components.base import BuildingComponent 
-from neuromancer.hvac.building import BuildingSystem 
+from neuromancer.hvac.building_components.base import BuildingComponent
+from neuromancer.hvac.building import BuildingSystem
 
-import os
-if os.environ.get("RUNTIME_TYPING", 1):
-    from beartype import beartype
-else:
-    # passthrough for no type checking
-    def beartype(fn): return fn
+from ._runtime import beartype
 
 
 @beartype
@@ -64,37 +59,16 @@ def simplot(
     model_name = getattr(model, 'name', model.__class__.__name__)
     
     if results is None:
-        # Standard simulation parameters
-        sim_kwargs = {
-            't_duration': 86400.0,
-            'dt': 300,
-            't_start': 5.0*60*60,  # 5 AM
-            **kwargs
-        }
-
-        # Both models use same method and return same format!
+        # Run the model. simulate() uses t_dt (seconds) and resolves t_start from
+        # the component context when not given.
+        sim_kwargs = {'t_duration': 86400.0, 't_dt': 300.0, **kwargs}
         results = model.simulate(**sim_kwargs)
 
-        t_duration = sim_kwargs['t']
-        dt = sim_kwargs['dt']
-        t_start = sim_kwargs['t_start']
-    else:
-        # Extract time parameters from existing results
-        t_start, dt, t_duration = _extract_time_params_from_results(results, batch_idx)
+    # Time parameters are read from the results' absolute time vector either way.
+    t_start, dt, t_duration = _extract_time_params_from_results(results, batch_idx)
 
-    # Get time vector for plotting - same for both model types
-    # time_vec = results['t'][batch_idx, :]
-    # time_vec = _create_time_vector(results, batch_idx, t_start, dt)
-
-    # Select and filter variables
     var_names = _select_variables(results, variables)
 
-    # Apply time range filtering - same logic for both
-    # time_hours_plot, results_plot = _apply_time_range_filter(
-    #     results, var_names, time_vec, time_range, t_start, batch_idx
-    # )
-
-    # Create the plot
     fig = _create_plot(
         results, var_names, time_range, t_start, t_duration, dt,
         batch_idx, model_name, figsize, title, filename
@@ -123,108 +97,47 @@ def _extract_time_params_from_results(results: Dict[str, torch.Tensor],
 
 
 @beartype
-def _create_time_vector(results: Dict[str, torch.Tensor],
-                        batch_idx: int,
-                        t_start: float,
-                        dt: float) -> torch.Tensor:
-    """Create time vector for plotting - same format for both model types."""
-
-    # Both return [batch_size, time, ...] format
-    # Find the maximum time dimension across all variables (excluding 't' and 'dt')
-    data_vars = [k for k in results.keys() if k not in ['t', 'dt']]
-    if data_vars:
-        sample_result = results[data_vars[0]]
-        n_steps = sample_result.shape[1]  # time is always dimension 1
-    else:
-        # Fallback to 't' if no other variables
-        sample_result = next(iter(results.values()))
-        n_steps = sample_result.shape[1]
-
-    return torch.arange(t_start, t_start+dt*n_steps, dt)
-
-
-@beartype
 def _select_variables(results: Dict[str, torch.Tensor],
                       variables: Optional[List[str]]) -> List[str]:
+    """Select which variables to plot (time bookkeeping keys are never plotted)."""
+    no_plot = ['t', 'dt', 't_start', 't_duration']
 
-    no_plot = ['t_start', 'dt', 't_duration']
-
-    """Select which variables to plot."""
     if variables is None:
-        # Plot all variables except time parameters
         var_names = list(results.keys())
     else:
         var_names = []
         for var in variables:
             assert var in results, f"{var} not in results for plotting"
             var_names.append(var)
-            
+
+    var_names = [v for v in var_names if v not in no_plot]
     assert var_names, "No variables found for plotting"
+    return var_names
 
-    return [v for v in var_names if v not in no_plot]
 
+def _variable_unit(var: str) -> Tuple[str, bool]:
+    """
+    Infer the display unit (and whether it is a temperature) for a variable from
+    the project naming convention (see developer.md). Temperatures are stored in
+    Kelvin but displayed in degrees Celsius.
 
-# def _apply_time_range_filter(results: Dict[str, torch.Tensor],
-#                              var_names: List[str],
-#                              time_vec: torch.Tensor,
-#                              time_range: Optional[Tuple[float, float]],
-#                              t_start: float,
-#                              batch_idx: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-#     """Apply time range filtering to results - same format for both model types."""
-#     results_plot = {}
-
-#     # Process each variable and ensure time alignment
-#     for var in var_names:
-#         data = results[var][batch_idx, :].detach().cpu().numpy()
-
-#         # Handle potential mismatch between time and data lengths
-#         if len(data) != len(time_hours):
-#             if len(data) == len(time_hours) + 1:
-#                 # Data has one more point than time (initial condition + n steps)
-#                 # Create extended time array
-#                 dt_hours = time_hours[1] - time_hours[0] if len(time_hours) > 1 else 1/12  # 5min default
-#                 extended_time = torch.cat([
-#                     torch.tensor([time_hours[0] - dt_hours]),
-#                     torch.tensor(time_hours)
-#                 ])
-#                 time_hours_for_var = extended_time
-#             elif len(data) == len(time_hours) - 1:
-#                 # Data has one fewer point than time
-#                 time_hours_for_var = time_hours[:-1]
-#             else:
-#                 # Other mismatches - truncate to shorter length
-#                 min_len = min(len(data), len(time_hours))
-#                 data = data[:min_len]
-#                 time_hours_for_var = time_hours[:min_len]
-#         else:
-#             time_hours_for_var = time_hours
-
-#         # Store the aligned time for this variable
-#         if var == var_names[0]:  # Use first variable's time as reference
-#             time_hours_plot = time_hours_for_var
-
-#         results_plot[var] = data
-
-#     # Apply time range filtering if specified
-#     if time_range is not None:
-#         start_hour, end_hour = time_range
-#         start_abs = t_start_hour + start_hour
-#         end_abs = t_start_hour + end_hour
-
-#         # Find indices for time range
-#         mask = (time_hours_plot >= start_abs) & (time_hours_plot <= end_abs)
-#         time_hours_plot = time_hours_plot[mask]
-
-#         # Filter all results with the same mask
-#         for var in var_names:
-#             if len(results_plot[var]) == len(mask):
-#                 results_plot[var] = results_plot[var][mask]
-#             else:
-#                 # Handle length mismatch in masking
-#                 var_mask = mask[:len(results_plot[var])]
-#                 results_plot[var] = results_plot[var][var_mask]
-
-#     return time_hours_plot, results_plot
+    Returns:
+        (unit_label, is_temperature)
+    """
+    name = var.split('.')[-1]  # strip the "<node>." namespace prefix
+    if 'T_' in name:                       # T_* -> temperature [K], shown as [°C]
+        return '°C', True
+    if 'Q_' in name or name.endswith('power') or 'heat_flow' in name:
+        return 'W', False
+    if 'P_' in name:
+        return 'Pa', False
+    if 'airflow' in name:
+        return 'kg/s', False
+    if 'position' in name:
+        return '[0-1]', False
+    if 'weather_factor' in name or 'integral_accumulator' in name:
+        return '[-]', False
+    return '', False
 
 
 @beartype
@@ -239,85 +152,74 @@ def _create_plot(results: Dict[str, torch.Tensor],
                  figsize: Optional[Tuple[float, float]],
                  title: Optional[str],
                  filename: Optional[str]) -> plt.Figure:
-    """Create the actual matplotlib plot."""
-    # Calculate figure size
+    """Create the actual matplotlib plot.
+
+    Series are plotted against elapsed hours from the start of the run; the
+    x-axis is formatted back to wall-clock time. ``time_range`` (start_hour,
+    end_hour) zooms to a window of elapsed time.
+    """
+    zoomed = time_range is not None and (time_range[1] - time_range[0]) <= 4
+
     n_vars = len(var_names)
     if figsize is None:
-        width = 12 if time_range else 8
-        height = min(2.5 * n_vars, 20)  # Cap at reasonable height
+        width = 12.0 if time_range else 8.0
+        height = min(2.5 * n_vars, 20.0)  # Cap at reasonable height
         figsize = (width, height)
 
-    # Create plots
     fig, axes = plt.subplots(n_vars, 1, figsize=figsize, sharex=True)
     if n_vars == 1:
         axes = [axes]
 
-    time_vec = results['t'][batch_idx, :].cpu().numpy().flatten()
+    # Absolute epoch time -> elapsed hours from the start of the run.
+    time_sec = results['t'][batch_idx].detach().cpu().numpy().flatten()
+    elapsed_hr = (time_sec - time_sec[0]) / 3600.0
+    keep = None
+    if time_range is not None:
+        keep = (elapsed_hr >= time_range[0]) & (elapsed_hr <= time_range[1])
 
     for i, var in enumerate(var_names):
         data = results[var]
-
-        if not hasattr(data, 'ndim'):
-            print(f"Asked to plot {data} which seems to be scalar")
+        if not hasattr(data, 'ndim') or data.ndim != 3:
+            print(f"Skipping {var}: expected (batch, steps, features), "
+                  f"got {getattr(data, 'shape', type(data))}")
             continue
-        elif data.ndim != 3:
-            print(f"Data has wrong shape {data.shape}, should be (batch, steps, features)")
 
-        # Everything should be shaped like (batches, steps, features)
-        for feat in range(data.shape[2]):
-            axes[i].plot(time_vec, data[batch_idx, :, feat], 
-                         label=var+f' {feat}', linewidth=1.5)
-        axes[i].set_ylabel(var)
+        unit, is_temperature = _variable_unit(var)
+        series = data[batch_idx].detach().cpu().numpy()  # [steps, features]
+        if is_temperature:
+            series = series - 273.15  # Kelvin -> Celsius for display only
+        # State/output trajectories include the initial condition (length nsteps+1),
+        # while inputs and 't' are length nsteps; align to the common length.
+        n = min(len(elapsed_hr), series.shape[0])
+        x = elapsed_hr[:n]
+        y = series[:n]
+        if keep is not None:
+            mask = keep[:n]
+            x, y = x[mask], y[mask]
+
+        for feat in range(y.shape[1]):
+            axes[i].plot(x, y[:, feat], label=f"{var} {feat}", linewidth=1.5)
+        axes[i].set_ylabel(f"{var} [{unit}]" if unit else var)
         axes[i].grid(True, alpha=0.3)
         axes[i].legend(loc='best')
 
-        # Add value annotations for zoomed plots
-        # if time_range and len(time_vec) < 100:
-        #     # Annotate start and end values for short time series
-        #     axes[i].annotate(f'{y_data[0]:.3f}',
-        #                      xy=(time_vec[0], y_data[0]),
-        #                      xytext=(5, 5), textcoords='offset points',
-        #                      fontsize=8, alpha=0.7)
-        #     axes[i].annotate(f'{y_data[-1]:.3f}',
-        #                      xy=(time_vec[-1], y_data[-1]),
-        #                      xytext=(5, 5), textcoords='offset points',
-        #                      fontsize=8, alpha=0.7)
-
-    # Apply time formatting
+    # x-axis: format elapsed hours back to wall-clock time.
     time_formatter = _create_time_formatter(t_start, time_range)
-
     for ax in axes:
         ax.xaxis.set_major_formatter(FuncFormatter(time_formatter))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=8 if zoomed else 6))
+        plt.setp(ax.xaxis.get_majorticklabels(),
+                 rotation=45 if zoomed else 0, ha='right' if zoomed else 'center')
 
-        if time_range and (time_range[1] - time_range[0]) <= 4:
-            ax.xaxis.set_major_locator(MaxNLocator(nbins=8))
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
-        else:
-            ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=0, ha='center')
+    hour_of_day = floor((t_start % 86400) / 3600)
+    hour_12 = ((hour_of_day - 1) % 12) + 1
+    start_am_pm = "AM" if hour_of_day < 12 else "PM"
+    axes[-1].set_xlabel(f"Time (starting {int(hour_12)} {start_am_pm})")
 
-    # Set xlabel
-    if time_range and (time_range[1] - time_range[0]) <= 4:
-        axes[-1].set_xlabel("Time")
-    else:
-        hour_of_day = floor((t_start % 86400) / 3600)
-        hour_12 = ((hour_of_day - 1) % 12) + 1 
-        start_am_pm = "AM" if hour_of_day < 12 else "PM"
-        axes[-1].set_xlabel(f"Time (Starting {int(hour_12)} {start_am_pm})")
-
-    # Set title
     if title is None:
-        if time_range:
-            title = (f"{model_name} Simulation: "
-                     f"{time_range[1] - time_range[0]:.1f} hours "
-                     f"(dt={dt:.1f}sec, batch={batch_idx})")
-        else:
-            hour_of_day = floor((t_start % 86400) / 3600)
-            hour_12 = ((hour_of_day - 1) % 12) + 1 
-            start_am_pm = "AM" if hour_of_day < 12 else "PM"
-            title = (f"{model_name} Simulation: "
-                     f"{t_duration/3600:.1f} hours from {int(hour_12)} {start_am_pm} "
-                     f"(dt={dt:.1f}sec, batch={batch_idx})")
+        span_hours = (time_range[1] - time_range[0]) if time_range else (t_duration / 3600.0)
+        title = (f"{model_name} Simulation: {span_hours:.1f} hours "
+                 f"from {int(hour_12)} {start_am_pm} (dt={dt:.0f}s, batch={batch_idx})")
 
     fig.suptitle(title, y=1.02)
     fig.tight_layout()
@@ -331,19 +233,15 @@ def _create_plot(results: Dict[str, torch.Tensor],
 @beartype
 def _create_time_formatter(t_start: float,
                            time_range: Optional[Tuple[float, float]] = None):
-    """Create time formatter for matplotlib."""
+    """Format an elapsed-hours x value as wall-clock time of day."""
+    zoomed = time_range is not None and (time_range[1] - time_range[0]) <= 4
 
     def format_time_tick(x, pos):
-        t_of_day = (t_start + x) % 86400
-        # ((a-1) % p) + 1 makes the resulting zeros equal p
-        h = int(t_of_day / 3600)
-        h_12 = ((h-1) % 12) + 1  
-        m = int(t_of_day / 60)
+        t_of_day = (t_start + x * 3600.0) % 86400  # x is elapsed hours
+        h = int(t_of_day // 3600)
+        h_12 = ((h - 1) % 12) + 1  # ((a-1) % p) + 1 maps 0 -> p
+        m = int((t_of_day % 3600) // 60)
         am_pm = "AM" if h < 12 else "PM"
-
-        if time_range and (time_range[1] - time_range[0]) <= 4:
-            return f"{h_12}:{m:02d} {am_pm}"
-        else:
-            return f"{int(h_12)} {am_pm}"
+        return f"{h_12}:{m:02d} {am_pm}" if zoomed else f"{h_12} {am_pm}"
 
     return format_time_tick

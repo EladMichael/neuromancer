@@ -1,5 +1,3 @@
-# TODO: Fix plotting
-# TODO: Confirm single component simulations still work.
 """
 Building System Simulation Example
 
@@ -21,13 +19,13 @@ import torch
 import os
 
 # default runtime behavior is to type check!
-# this may slow down performance for heavy 
-# workloads. Uncomment the following line to turn
-# off runtime typechecking. 
-# os.environ["RUNTIME_TYPING"] = False
+# this may slow down performance for heavy
+# workloads. Set RUNTIME_TYPING to "0" (before importing neuromancer.hvac)
+# to turn off runtime type checking.
+# os.environ["RUNTIME_TYPING"] = "0"
 
 # Import building components
-from neuromancer.hvac.building_components import RTU, VAVBox, Envelope, SolarGains
+from neuromancer.hvac.building_components import RTU, VAVBox, Envelope
 from neuromancer.hvac.building import BuildingNode, BuildingSystem
 from neuromancer.hvac.plot import simplot
 
@@ -41,18 +39,9 @@ n_zones = 2
 
 print("Creating building components...")
 
-# 1. Solar gains for external heat input
-solar = SolarGains(
-    n_zones=n_zones,
-    window_area=25.0,  # m² per zone
-    window_orientation=[0.0, 90.0],  # South, West facing windows
-    window_shgc=0.6,   # Solar heat gain coefficient
-    latitude_deg=40.0,  # Building latitude
-    max_solar_irradiance=800.0  # W/m²
-)
-
-
-# 2. Building envelope for thermal dynamics
+# 1. Building envelope for thermal dynamics. It consumes raw irradiance [W/m^2]
+#    and occupancy [-] directly, converting them to heat via its learnable
+#    per-zone solar_gain / internal_gain (the grey-box "B matrix").
 envelope = Envelope(
     n_zones=n_zones,
     R_env=[0.1, 0.12],    # Zone-specific thermal resistance [K/W]
@@ -88,48 +77,43 @@ vav = VAVBox(
 
 print("Creating BuildingNode wrappers...")
 
-# Wrap components as nodes
-envelope_inputs = {
-    "envelope.T_zones": "T_zones",
-    "T_outdoor": "T_outdoor",
-    "solar.Q_solar": "Q_solar",
-    "Q_internal": "Q_internal",
-    "vav.Q_supply_flow": "Q_hvac"
-}
+# Wrap components as nodes. input_keys are the data-dict keys, ordered to match
+# each component's forward() arguments (states first, then externals); t/dt are
+# threaded automatically. The trailing comment on each line names the argument fed.
+envelope_inputs = [
+    "envelope.T_zones",     # T_zones (state)
+    "T_outdoor",            # T_outdoor
+    "irradiance",           # irradiance
+    "occupancy",            # occupancy
+    "vav.Q_supply_flow",    # Q_hvac
+]
 
-rtu_inputs = {
-    "T_outdoor": "T_outdoor",
-    "envelope.T_zones": "T_return_zones",
-    "vav.supply_airflow": "return_airflow_zones",
-    "rtu_T_supply_setpoint": "T_supply_setpoint",
-    "rtu_supply_airflow_setpoint": "supply_airflow_setpoint",
-    "rtu.damper_position": "damper_position",
-    "rtu.valve_position": "valve_position",
-    "rtu.T_supply": "T_supply",
-    "rtu.integral_accumulator": "integral_accumulator",
-}
+rtu_inputs = [
+    "rtu.T_supply",                  # T_supply (state)
+    "rtu.damper_position",           # damper_position (state)
+    "rtu.valve_position",            # valve_position (state)
+    "rtu.integral_accumulator",      # integral_accumulator (state)
+    "T_outdoor",                     # T_outdoor
+    "envelope.T_zones",              # T_return_zones
+    "vav.supply_airflow",            # return_airflow_zones
+    "rtu_T_supply_setpoint",         # T_supply_setpoint
+    "rtu_supply_airflow_setpoint",   # supply_airflow_setpoint
+]
 
-vav_inputs = {
-    "envelope.T_zones": "T_zone",
-    "vav_T_setpoint": "T_setpoint",
-    "rtu.T_supply": "T_supply_upstream",
-    "rtu.P_supply": "P_duct",
-    "vav.damper_position": "damper_position",
-    "vav.reheat_position": "reheat_position",
-}
+vav_inputs = [
+    "vav.damper_position",   # damper_position (state)
+    "vav.reheat_position",   # reheat_position (state)
+    "envelope.T_zones",      # T_zone
+    "vav_T_setpoint",        # T_setpoint
+    "rtu.T_supply",          # T_supply_upstream
+    "rtu.P_supply",          # P_duct
+]
 
-solar_inputs = {
-    "T_outdoor": "T_outdoor",
-    "weather_factor": "weather_factor",
-}
+envelope_node = BuildingNode(envelope, input_keys=envelope_inputs, name="envelope")
+rtu_node = BuildingNode(rtu, input_keys=rtu_inputs, name="rtu")
+vav_node = BuildingNode(vav, input_keys=vav_inputs, name="vav")
 
-solar_node = BuildingNode(solar, input_map=solar_inputs, name="solar")
-envelope_node = BuildingNode(
-    envelope, input_map=envelope_inputs, name="envelope")
-rtu_node = BuildingNode(rtu, input_map=rtu_inputs, name="rtu")
-vav_node = BuildingNode(vav, input_map=vav_inputs, name="vav")
-
-t_start = 5*60*60  # 6 AM in seconds
+t_start = 5*60*60  # 5 AM in seconds
 t_duration = 86400  # 24 hrs in seconds
 dt = 300  # 5 minutes
 t_rng = range(t_start, t_start+t_duration, dt)
@@ -137,15 +121,12 @@ t_rng = range(t_start, t_start+t_duration, dt)
 data = {}
 # Weather and occupancy disturbance variables
 # shape is (batch, steps, features)
-data["t"] = torch.tensor(t_rng).reshape(1, -1, 1) 
-# data["t_start"] = t_start
-# data["dt"] = dt
-# data["t_duration"] = t_duration
-data["Q_internal"] = torch.stack([envelope.input_functions["Q_internal"](
+data["t"] = torch.tensor(t_rng).reshape(1, -1, 1)
+data["T_outdoor"] = torch.stack([envelope.input_functions["T_outdoor"](
     t, batch_size=1) for t in t_rng], dim=1)
-data["T_outdoor"] = torch.stack([solar.input_functions["T_outdoor"](
+data["irradiance"] = torch.stack([envelope.input_functions["irradiance"](
     t, batch_size=1) for t in t_rng], dim=1)
-data["weather_factor"] = torch.stack([solar.input_functions["weather_factor"](
+data["occupancy"] = torch.stack([envelope.input_functions["occupancy"](
     t, batch_size=1) for t in t_rng], dim=1)
 
 
@@ -158,12 +139,10 @@ data["vav_T_setpoint"] = torch.stack(
     [vav.input_functions["T_setpoint"](t, batch_size=1) for t in t_rng], dim=1)
 
 
-# 1. SolarGains - generates solar_gains (external input)
-# 2. RTU - processes return air, generates supply conditions
-# 3. VAVBox - modulates supply air, generates zone loads
-# 4. Envelope - integrates all heat sources, updates zone temperatures
+# 1. RTU - processes return air, generates supply conditions
+# 2. VAVBox - modulates supply air, generates zone loads
+# 3. Envelope - integrates all heat sources, updates zone temperatures
 system = BuildingSystem([
-    solar_node,    # External gains first
     rtu_node,      # Central equipment processes return air
     vav_node,      # Terminal units modulate supply
     envelope_node  # Thermal dynamics last (integrates all loads)
@@ -239,7 +218,7 @@ fig, _ = simplot(
     results=results,
     variables=available_vars,
     time_range=None,  # Full day
-    figsize=(14, 10),
+    figsize=(14., 10.),
     title="Two-Zone Building System - 24 Hour Simulation",
     filename='plots/24hr.png'
 )

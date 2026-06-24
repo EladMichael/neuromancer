@@ -28,12 +28,7 @@ import math
 from typing import Union, List
 from .base import BuildingComponent
 import neuromancer.hvac.simclock as simclock
-import os
-if os.environ.get("RUNTIME_TYPING", 1):
-    from beartype import beartype
-else:
-    # passthrough for no type checking
-    def beartype(fn): return fn
+from .._runtime import beartype
 
 
 class SolarGains(BuildingComponent):
@@ -82,20 +77,19 @@ class SolarGains(BuildingComponent):
     @beartype
     def __init__(
             self,
-            # Zone specifications
-            n_zones: int = 1,
+            # Scenario/geometry: no defaults (these describe the building and its site)
+            n_zones: int,                                    # number of zones
+            window_area: Union[float, List[float]],          # [m²] Window area per zone
+            window_orientation: Union[float, List[float]],   # [deg] 0=south, 90=west, etc.
+            latitude_deg: float,                             # [deg] Building latitude (site)
 
-            # Window parameters (can be scalar or per-zone)
-            window_area: Union[float, List[float]] = 10.0,  # [m²] Window area per zone
-            window_orientation: Union[float, List[float]] = 0.0,  # [deg] 0=south, 90=west, etc.
-            window_shgc: Union[float, List[float]] = 0.6,  # [-] Solar heat gain coefficient
-
-            # Location and solar estimation parameters
-            latitude_deg: float = 40.0,  # [deg] Building latitude
-            max_solar_irradiance: float = 800.0,  # [W/m²] Peak solar irradiance
+            # Material / model parameters (defaults OK)
+            window_shgc: Union[float, List[float]] = 0.6,    # [-] Solar heat gain coefficient
+            max_solar_irradiance: float = 800.0,             # [W/m²] Peak solar irradiance
 
             # Standard BuildingComponent parameters
-            learnable: dict = None,
+            context: dict = None,  # Building operating context (scenario) for init/inputs
+            learnable: set = None,
             device=None,
             dtype=torch.float32
     ):
@@ -127,67 +121,53 @@ class SolarGains(BuildingComponent):
     @beartype
     def estimate_solar_irradiance(
             self,
-            t: torch.Tensor,
+            t: float,
             T_outdoor: torch.Tensor,
             weather_factor: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Estimate solar irradiance from outdoor temperature and weather patterns.
+        Estimate solar irradiance from solar geometry, outdoor temperature and weather.
 
-        Uses empirical relationships based on the observation that:
-        - Peak outdoor temperatures correlate with solar intensity
-        - Daily temperature patterns follow solar patterns with thermal lag
-        - Weather factors modulate both temperature and solar gains
+        Solar position depends only on (scalar) time, so the geometry is computed with
+        plain math and combined with the per-batch temperature/weather tensors. This
+        avoids running datetime through torch.vmap (which is not vmap-compatible).
 
         Args:
-            t: seconds from epoch [s], shape [batch_size, 1]
+            t: seconds from epoch [s] (scalar).
             T_outdoor: Outdoor air temperature [K], shape [batch_size, 1]
             weather_factor: Weather clarity [0-1], shape [batch_size, 1]
 
         Returns:
             torch.Tensor: Estimated solar irradiance [W/m²], shape [batch_size, 1]
         """
+        # Solar position (scalars, from the shared simulation clock).
+        h_of_day = simclock.hour_of_day(t)
+        d_of_year = simclock.day_of_year(t)
 
-        # Solar position approximation (simplified)
-        # Declination angle (seasonal variation)
-        h_of_day = simclock.hours_of_day(t)
-        d_of_year = simclock.days_of_year(t)
+        day_angle = 2 * math.pi * (d_of_year - 81) / 365
+        declination = 23.45 * math.pi / 180 * math.sin(day_angle)
+        hour_angle = (h_of_day - 12) * 15 * math.pi / 180
 
-        day_angle = 2 * math.pi * (d_of_year - 81) / 365  # [batch_size, 1]
-        declination = 23.45 * math.pi / 180 * torch.sin(day_angle)  # [batch_size, 1]
+        sin_elevation = (
+            math.sin(self.latitude_rad) * math.sin(declination) +
+            math.cos(self.latitude_rad) * math.cos(declination) * math.cos(hour_angle)
+        )
+        solar_elevation = math.asin(max(-1.0, min(1.0, sin_elevation)))
 
-        # Hour angle
-        hour_angle = (h_of_day - 12) * 15 * math.pi / 180  # [batch_size, 1]
+        # Base solar irradiance from geometry (0-d tensor via max_solar_irradiance buffer).
+        base_irradiance = self.max_solar_irradiance * max(0.0, math.sin(solar_elevation))
 
-        # Solar elevation (simplified)
-        lat = torch.full_like(declination, self.latitude_rad)
-        solar_elevation = torch.asin(
-            torch.clamp(
-                torch.sin(lat) * torch.sin(declination) +
-                torch.cos(lat) * torch.cos(declination) * torch.cos(hour_angle),
-                -1.0, 1.0
-            )
-        )  # [batch_size, 1]
-
-        # Base solar irradiance from geometry
-        base_irradiance = self.max_solar_irradiance * torch.clamp(torch.sin(solar_elevation), 0.0, 1.0)
-
-        # Temperature-based adjustment
-        # Higher outdoor temperatures suggest stronger solar conditions
-        # Use a reference temperature for normalization
+        # Higher outdoor temperatures correlate with stronger solar conditions.
         T_ref = 293.15  # [K] Reference temperature (20°C)
-        temp_factor = 1.0 + 0.02 * (T_outdoor - T_ref)  # 2% increase per degree above reference
-        temp_factor = torch.clamp(temp_factor, 0.5, 1.5)  # Reasonable bounds
+        temp_factor = torch.clamp(1.0 + 0.02 * (T_outdoor - T_ref), 0.5, 1.5)
 
-        # Apply weather factor and temperature correlation
         estimated_irradiance = base_irradiance * weather_factor * temp_factor
-
         return torch.clamp(estimated_irradiance, 0.0, self.max_solar_irradiance)
 
     @beartype
     def calculate_solar_gains(
             self,
-            t: torch.Tensor,
+            t: float,
             T_outdoor: torch.Tensor,
             weather_factor: torch.Tensor,
 
@@ -196,7 +176,7 @@ class SolarGains(BuildingComponent):
         Calculate solar heat gains through windows for all zones.
 
         Args:
-            t: Time of day [s], shape [batch_size, 1]
+            t: seconds from epoch [s] (scalar).
             T_outdoor: Outdoor temperature [K], shape [batch_size, 1]
             weather_factor: Weather clarity [0-1], shape [batch_size, 1]
 
@@ -243,11 +223,8 @@ class SolarGains(BuildingComponent):
             dict: Solar gains and diagnostics, all tensors shape [batch_size, n_zones]
                 Q_solar: Solar heat gains through windows [W]
         """
-        # Convert time to tensor for calculations
-        t_tensor = torch.full_like(T_outdoor, float(t))
-
-        # Calculate solar gains
-        Q_solar = self.calculate_solar_gains(t_tensor, T_outdoor, weather_factor)
+        # Solar position depends only on (scalar) time; pass it through directly.
+        Q_solar = self.calculate_solar_gains(float(t), T_outdoor, weather_factor)
 
         self.diagnostics = {}
 
@@ -308,8 +285,8 @@ class SolarGains(BuildingComponent):
                 daily_temp = daily_amplitude * np.sin(2 * np.pi * (h_of_day - peak_hour) / 24)
                 seasonal_temp = seasonal_amplitude * np.sin(2 * np.pi * (d_of_year - 80) / 365)
                 total_temp = base_temp + daily_temp + seasonal_temp
-                total_temp = torch.full((batch_size, 1), total_temp)
-                return total_temp
+                return torch.full((batch_size, 1), float(total_temp),
+                                  device=self.device, dtype=self.dtype)
 
             self._input_functions = {
                 "T_outdoor": T_outdoor_fn,

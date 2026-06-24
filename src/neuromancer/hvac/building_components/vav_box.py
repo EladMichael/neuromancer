@@ -61,12 +61,7 @@ from .base import BuildingComponent
 from ..actuators.damper import Damper
 from ..actuators.electric_reheat_coil import ElectricReheatCoil
 import neuromancer.hvac.simclock as simclock
-import os
-if os.environ.get("RUNTIME_TYPING", 1):
-    from beartype import beartype
-else:
-    # passthrough for no type checking
-    def beartype(fn): return fn
+from .._runtime import beartype
 
 
 @beartype
@@ -182,10 +177,15 @@ class VAVBox(BuildingComponent):
         "total_power": (0.0, 5500.0),  # [W] Total power consumption
     }
 
+    @property
+    def state_widths(self) -> dict:
+        """Both actuator states are per-zone, width n_zones."""
+        return {"damper_position": self.n_zones, "reheat_position": self.n_zones}
+
     @beartype
     def __init__(
             self,
-            n_zones: int = 1,
+            n_zones: int,  # building geometry: number of zones served (no default)
             # Zone-specific parameters (can be scalar or list[n_zones])
             control_gain=2.0,
             airflow_min=0.05,
@@ -201,9 +201,10 @@ class VAVBox(BuildingComponent):
             T_supply_cooling_min=288.15,  # 15°C (60°F)
             # String parameters (not expanded)
             heating_characteristic='linear',
-            actuator_model='smooth_approximation',
+            actuator_model='analytic',
             # Standard parameters
-            learnable: dict = None,
+            context: dict = None,  # Building operating context (scenario) for init/inputs
+            learnable: set = None,
             device=None,
             dtype=torch.float32,
     ):
@@ -245,7 +246,6 @@ class VAVBox(BuildingComponent):
             dtype (torch.dtype): Tensor data type for computation.
         """
         super().__init__(params=locals(), learnable=learnable, device=device, dtype=dtype)
-        print("initializing VAV box component")
         # Initialize sub-components with zone-specific parameters
         self.damper = Damper(
             max_airflow=self.airflow_max,         # [n_zones] tensor from base class
@@ -316,9 +316,10 @@ class VAVBox(BuildingComponent):
                 Diagnostic outputs available via .diagnostics property after calling forward().
         """
         # --- MODE DETECTION ---
-        # Detect cooling vs heating mode based on supply air temperature relative to setpoint
-        # cooling_mode = T_supply_upstream < (T_setpoint - self.mode_deadband)  # [batch_size, n_zones]
-        cooling_mode = T_zone > (T_setpoint - self.mode_deadband)  # don't want reheat
+        # Cooling vs heating is determined by the air the central AHU is delivering:
+        # cold primary air (well below setpoint) => cooling mode; otherwise heating.
+        # The deadband prevents mode hunting when supply air sits near setpoint.
+        cooling_mode = T_supply_upstream < (T_setpoint - self.mode_deadband)  # [batch_size, n_zones]
         # --- MODE-DEPENDENT AIRFLOW CONTROL ---
         T_error = T_setpoint - T_zone  # [batch_size, n_zones] - positive when zone is cold
 
@@ -354,7 +355,7 @@ class VAVBox(BuildingComponent):
                 airflow=airflow_actual,
                 cp_air=self.cp_air,
                 T_current=T_supply_upstream,
-                T_min=torch.full_like(T_setpoint, self.T_supply_cooling_min)
+                T_min=self.T_supply_cooling_min  # 0-d buffer broadcasts over [batch, n_zones]
             ),
             # Heating mode: Boost heating when central supply isn't sufficient
             calculate_reheat_load(
@@ -409,7 +410,9 @@ class VAVBox(BuildingComponent):
             # ====================
             "damper_position": damper_position,
             "reheat_position": reheat_position,
-            "total_power": reheat_electrical_power.mean(dim=-1, keepdim=True),
+            # Per-zone reheat electrical power [W], shape [batch, n_zones] (no fan in a
+            # VAV terminal; fan power is modelled at the RTU). Aggregate downstream.
+            "total_power": reheat_electrical_power,
         }
 
     def initial_state_functions(self, mode="realistic"):

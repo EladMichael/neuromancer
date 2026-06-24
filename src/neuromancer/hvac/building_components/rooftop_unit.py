@@ -62,12 +62,7 @@ import neuromancer.hvac.simclock as simclock
 from .base import BuildingComponent
 from ..actuators.actuator import Actuator
 from ..simulation_inputs.schedules import seasonal_temperature
-import os
-if os.environ.get("RUNTIME_TYPING", 1):
-    from beartype import beartype
-else:
-    # passthrough for no type checking
-    def beartype(fn): return fn
+from .._runtime import beartype
 
 # =============================================================================
 # POWER CALCULATION FUNCTIONS
@@ -108,79 +103,6 @@ def calculate_hvac_power(actual_airflow: torch.Tensor, Q_cooling_load: torch.Ten
         "heating_power": heating_power,
         "total_power": total_power
     }
-
-# =============================================================================
-# PHYSICS FUNCTIONS
-# =============================================================================
-
-
-@beartype
-def calculate_air_mixing(airflow: torch.Tensor, airflow_oa_min: torch.Tensor,
-                         T_oa: torch.Tensor, T_ra: torch.Tensor) -> tuple:
-    """Calculate air mixing for HVAC components that combine outdoor and return air."""
-    # Handle zero airflow case
-    zero_flow_mask = airflow < 1e-6
-
-    # Calculate outdoor air fraction (clamped to valid range)
-    oa_fraction = torch.clamp(airflow_oa_min / (airflow + 1e-8), 0.0, 1.0)
-
-    # For zero airflow, use 100% outdoor air
-    oa_fraction = torch.where(zero_flow_mask, torch.ones_like(oa_fraction), oa_fraction)
-
-    # Mixed temperature = weighted average
-    T_mixed_air = oa_fraction * T_oa + (1 - oa_fraction) * T_ra
-
-    return oa_fraction, T_mixed_air
-
-
-@beartype
-def calculate_thermal_load(airflow: torch.Tensor, cp_air: torch.Tensor,
-                           setpoint_temp: torch.Tensor, current_temp: torch.Tensor) -> torch.Tensor:
-    """Calculate thermal load required to change air temperature to setpoint."""
-    return airflow * cp_air * (setpoint_temp - current_temp)
-
-
-@beartype
-def apply_mode_limits(thermal_load: torch.Tensor, mode: str) -> torch.Tensor:
-    """Apply HVAC operating mode restrictions to thermal load."""
-    if mode == "cool":
-        return torch.clamp(thermal_load, max=0.0)  # Only cooling
-    elif mode == "heat":
-        return torch.clamp(thermal_load, min=0.0)  # Only heating
-    else:  # mode == "auto"
-        return thermal_load  # No restrictions
-
-
-@beartype
-def calculate_economizer_fraction(T_oa, T_ra, min_oa_fraction, T_economizer_max=297.15, ctrl_economizer_deadband=2.0):
-    """
-    Calculate outdoor air fraction for economizer operation.
-
-    Args:
-        T_oa: Outdoor air temperature [K]
-        T_ra: Return air temperature [K]
-        min_oa_fraction: Minimum outdoor air fraction for ventilation
-        T_economizer_max: High temperature limit for economizer lockout [K]
-        ctrl_economizer_deadband: Temperature deadband to prevent cycling [K]
-
-    Returns:
-        Enhanced outdoor air fraction for economizer operation
-    """
-    # Check economizer conditions
-    too_hot_outside = T_oa > T_economizer_max
-    insufficient_delta_t = T_oa >= (T_ra - ctrl_economizer_deadband)
-
-    # If economizer conditions not met, use minimum OA
-    if too_hot_outside.any() or insufficient_delta_t.any():
-        return min_oa_fraction
-
-    # Calculate enhanced fraction based on temperature difference
-    delta_T = T_ra - T_oa
-    enhancement = torch.clamp(delta_T * 0.1, max=0.7)  # Up to 70% enhancement
-    enhanced_fraction = min_oa_fraction + enhancement
-
-    return torch.clamp(enhanced_fraction, max=1.0)
-
 
 class RTU(BuildingComponent):
     """
@@ -287,13 +209,14 @@ class RTU(BuildingComponent):
         # RETURN VALUES - Primary outputs for downstream equipment
         # =========================================================================
         "supply_airflow": (0.0, 5.0),  # Actual total supply airflow delivered [kg/s]
-        "supply_heat_flow": (-50e3, 100e3),  # Thermal energy in supply air stream [W]
-        "P_supply": (100e3, 105e3),  # Supply duct pressure [Pa]
+        "supply_heat_flow": (-50e3, 100e3),  # Sensible heat added vs return air [W]
+        "P_supply": (0.0, 1500.0),  # Supply duct static pressure [Pa, gauge]
     }
 
     @beartype
     def __init__(
             self,
+            n_zones: int,  # building geometry: number of zones served (no default)
             # RTU parameters
             airflow_max: float = 3.0,  # [kg/s] Maximum total airflow capacity
             airflow_oa_min: float = 0.2,  # [kg/s] Minimum outdoor air for ventilation
@@ -316,9 +239,8 @@ class RTU(BuildingComponent):
             T_economizer_max: float = 297.15,  # [K] Economizer high limit
 
             # System parameters
-            n_zones=1,  # [-] Number of zones served (for input function generation)
-            actuator_model: str = "smooth_approximation",  # [-] Actuator dynamics model type
-            learnable: dict = None,  # [-] Parameters to make learnable
+            actuator_model: str = "analytic",  # [-] Actuator dynamics model type
+            learnable: set = None,  # [-] Parameter names to make learnable
             device=None,  # [-] Device for tensor computations
             dtype=torch.float32,  # [-] Tensor type for computation
             initial_states=None,
@@ -544,13 +466,16 @@ class RTU(BuildingComponent):
         # STEP 10: SUPPLY CONDITIONS FOR DOWNSTREAM EQUIPMENT
         # =====================================================================
 
-        # Supply air pressure
+        # Supply duct static pressure [Pa, GAUGE relative to atmosphere], so it
+        # matches the convention expected downstream by the VAV box / damper
+        # (hundreds of Pa), not absolute pressure. Fan static rises with flow^2.
         normalized_flow = supply_airflow / self.airflow_max  # [-]
-        P_fan_rise = 800.0 * normalized_flow ** 2  # [Pa]
-        P_supply = torch.full_like(supply_airflow, 101325.0) + P_fan_rise  # [Pa]
+        P_supply = 800.0 * normalized_flow ** 2  # [Pa] gauge duct static
 
-        # Supply air heat flow
-        supply_heat_flow = supply_airflow * self.cp_air * T_supply_final  # [kg/s] * [J/kg/K] * [K] = [W]
+        # Sensible heat added by the RTU to the air stream, referenced to the
+        # return air it conditions (relative, not absolute-to-0K): positive when
+        # heating, negative when cooling.
+        supply_heat_flow = supply_airflow * self.cp_air * (T_supply_final - T_return)  # [W]
 
         return {
             # Outputs
@@ -677,7 +602,6 @@ class RTU(BuildingComponent):
                 if hasattr(self, 'T_supply') and self.T_supply is not None:
                     T_supply = self.T_supply.expand(batch_size, self.n_zones)
                 else:
-                    print("Using default T_supply for zone temp in RTU")
                     T_supply = torch.full((batch_size, self.n_zones), T_supply_base,
                                           device=self.device, dtype=self.dtype)
 
@@ -710,7 +634,6 @@ class RTU(BuildingComponent):
                 if hasattr(self, 'supply_airflow') and self.supply_airflow is not None:
                     total_supply = self.supply_airflow
                 else:
-                    print("Using default supply_flow for zone temp in RTU")
                     total_supply = torch.full((batch_size, 1), supply_flow_expected,
                                               device=self.device, dtype=self.dtype)
 

@@ -14,38 +14,24 @@ ZONE VECTORIZATION SUPPORT:
 
 import torch
 from typing import Literal, Union, List
-import os
-if os.environ.get("RUNTIME_TYPING", 1):
-    from beartype import beartype
-else:
-    # passthrough for no type checking
-    def beartype(fn): return fn
+from .._runtime import beartype
 
 
 class Actuator(torch.nn.Module):
     """
     General actuator class with pluggable dynamics models and zone vectorization.
 
-    Supports multiple modeling approaches:
+    Supports two modeling approaches:
     - "instantaneous": No lag, output = setpoint immediately
-    - "analytic": Analytic solution to first-order lag (exact, fast)
-    - "smooth_approximation": Numerically stable approximation of the analytic solution
-                              Provides nicely behaved gradients for learning tau
+    - "analytic": Exact closed-form solution to the first-order lag,
+                  x(t+dt) = setpoint + (x - setpoint) * exp(-dt/tau).
+                  Exact, fast, and differentiable in tau (suitable for learning).
 
     Zone Vectorization:
         - Handles multiple zones simultaneously with zone-specific parameters
         - All tensor inputs/outputs have shape [batch_size, n_zones]
         - Parameters can be scalars (shared) or vectors (zone-specific)
         - Automatic broadcasting ensures compatibility between parameters and inputs
-
-    Numerical Considerations:
-        The analytic method provides exact solutions to the first-order lag equation.
-        For gradient-based learning of tau parameters, use smooth_approximation which
-        provides numerically stable gradients. The instantaneous method has no dynamics.
-
-    Removed Methods:
-        - "odesolve": Removed due to vectorization complexity and no accuracy advantage
-                     over the exact analytic solution. Use "analytic" instead.
 
     Units:
         position: [0-1] Normalized actuator position
@@ -68,11 +54,10 @@ class Actuator(torch.nn.Module):
             #   - List[n_zones]: Zone-specific time constants
             #   - Tensor[n_zones]: Zone-specific time constants
             # Typical: 5-15 s for electric actuators, 10-30 s for pneumatic
-            model: Literal["instantaneous", "analytic", "smooth_approximation"] = "instantaneous",
+            model: Literal["instantaneous", "analytic"] = "analytic",
             # Dynamics model type
             # "instantaneous": No lag (immediate response)
             # "analytic": Exact first-order lag solution
-            # "smooth_approximation": Gradient-friendly approximation for learning
 
             name: str = "actuator",
             # Actuator name for identification and debugging
@@ -93,10 +78,12 @@ class Actuator(torch.nn.Module):
         super().__init__()
         self.model = model
         self.name = name
-        # tau will be expanded to [n_zones] tensor by BuildingComponent base class
-        self.tau = tau
+        # Normalize tau to a tensor so the analytic lag works for bare actuators too.
+        # When constructed via a BuildingComponent, tau already arrives as a tensor
+        # (or learnable Parameter); as_tensor preserves it (and its autograd).
+        self.tau = tau if isinstance(tau, torch.Tensor) else torch.as_tensor(tau, dtype=torch.float32)
         # Validate model type
-        valid_models = ["instantaneous", "analytic", "smooth_approximation"]
+        valid_models = ["instantaneous", "analytic"]
         if model not in valid_models:
             raise ValueError(f"model must be one of {valid_models}, got {model}")
 
@@ -120,17 +107,12 @@ class Actuator(torch.nn.Module):
         Returns:
             Tensor: New actuator position [0-1], shape [batch_size, n_zones]
         """
-        assert setpoint, "Cannot call actuator without setpoint"
+        assert setpoint is not None, "Cannot call actuator without setpoint"
 
         if self.model == "instantaneous":
             return self._forward_instantaneous(setpoint)
-
         elif self.model == "analytic":
             return self._forward_analytic(setpoint, position, dt)
-
-        elif self.model == "smooth_approximation":
-            return self._forward_smooth_approximation(setpoint, position, dt)
-
         else:
             raise ValueError(f"Unknown model type: {self.model}")
 
@@ -160,7 +142,7 @@ class Actuator(torch.nn.Module):
         Returns:
             Tensor: New position [0-1], shape [batch_size, n_zones]
         """
-        assert all(arg for arg in [position,dt]), "Analytic model requires position and dt"
+        assert position is not None and dt is not None, "Analytic model requires position and dt"
 
         # Analytic solution: x(t+dt) = setpoint + (x_current - setpoint) * exp(-dt/tau)
         # Broadcasting: scalar / [n_zones] -> [n_zones]
@@ -168,70 +150,4 @@ class Actuator(torch.nn.Module):
         # Broadcasting: [batch_size, n_zones] + ([batch_size, n_zones] - [batch_size, n_zones]) * [n_zones]
         position_new = setpoint + (position - setpoint) * decay_factor
 
-        return position_new
-
-    def _forward_smooth_approximation(self, setpoint: torch.Tensor, position: torch.Tensor, dt: float) -> torch.Tensor:
-        """
-        Smooth approximation for stable gradients with adaptive approximation selection.
-
-        This method implements multiple approximations to the exact first-order lag response
-        (1 - exp(-dt/tau)) and selects the most appropriate one based on the rate (dt/tau)
-        and whether the model is in training or inference mode.
-
-        Approximation Methods:
-        - Taylor (1st order): rate ≈ (1 - exp(-rate)) for small rates
-        - Pade [1,1]: 2*rate/(2+rate) - rational approximation with good stability
-        - Tanh: tanh(rate) - bounded output, prevents gradient explosion
-        - Exact: 1 - exp(-rate) - mathematically exact solution
-
-        Selection Strategy:
-        Training mode (prioritizes gradient stability):
-        - Small rates (< 0.1): Taylor approximation for smooth gradients
-        - Medium rates (0.1-1.0): Pade approximation for stable gradients
-        - Large rates (> 1.0): Tanh approximation for bounded gradients
-
-        Inference mode (prioritizes accuracy):
-        - Most rates (< 2.0): Exact solution for maximum accuracy
-        - Very large rates (> 2.0): Tanh to avoid numerical overflow
-
-        This adaptive approach enables stable gradient-based learning of tau while
-        maintaining accuracy during inference.
-
-        Args:
-            position: Current position [0-1], shape [batch_size, n_zones]
-            setpoint: Desired position [0-1], shape [batch_size, n_zones]
-            dt: Time step [s]
-
-        Returns:
-            Tensor: New position [0-1], shape [batch_size, n_zones]
-        """
-
-        assert all(arg for arg in [position, dt]), "smooth_approximation requires position and dt"
-
-        # Broadcasting: scalar / [n_zones] -> [n_zones]
-        rate = dt / self.tau
-
-        # Select and calculate the needed step factor (element-wise operations)
-        if self.training:
-            # During training: prioritize gradient stability
-            # All conditions operate element-wise on rate tensor
-            small_rate = rate < 0.1
-            medium_rate = (rate >= 0.1) & (rate < 1.0)
-            large_rate = rate >= 1.0
-
-            step_factor = torch.zeros_like(rate)
-            step_factor[small_rate] = rate[small_rate]  # Taylor
-            step_factor[medium_rate] = (2 * rate[medium_rate]) / (2 + rate[medium_rate])  # Pade
-            step_factor[large_rate] = torch.tanh(rate[large_rate])  # Tanh
-        else:
-            # During inference: prioritize accuracy
-            normal_rate = rate < 2.0
-            large_rate = rate >= 2.0
-
-            step_factor = torch.zeros_like(rate)
-            step_factor[normal_rate] = 1 - torch.exp(-rate[normal_rate])  # Exact
-            step_factor[large_rate] = torch.tanh(rate[large_rate])  # Tanh for numerical stability
-
-        # Broadcasting: [batch_size, n_zones] + ([batch_size, n_zones] - [batch_size, n_zones]) * [n_zones]
-        position_new = position + (setpoint - position) * step_factor
         return position_new
