@@ -32,7 +32,6 @@ classifiers = [
 ]
 dependencies = [
     "dill",
-    "graphviz",
     "matplotlib",
     "networkx>=3,<4",
     "numpy>=1.23,<3.0",
@@ -40,16 +39,10 @@ dependencies = [
     "plum-dispatch==1.7.3",
     "scikit-learn",
     "scipy",
-    "six",
     "pydot==1.4.2",
-    "pyts",
     "torch",
     "torchdiffeq",
-    "toml", 
-    "lightning", 
-    "cvxpy", 
-    "cvxpylayers", 
-    "casadi",
+    "lightning",
     "torchsde"
 ]
 
@@ -66,6 +59,6 @@ where = ["src"]
 
 [project.optional-dependencies]
 tests = ["pytest", "hypothesis"]
-examples = ["imageio"]
+examples = ["imageio", "pyts"]
 docs = ["sphinx", "sphinx-rtd-theme"]
 tracking = ["mlflow>=2.12,<3", "wandb"]

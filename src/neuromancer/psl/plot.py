@@ -10,8 +10,6 @@ import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-import pyts.image as pytsimg
-import pyts.multivariate.image as pytsmvimg
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
 
 
@@ -101,6 +99,9 @@ def pltRecurrence(X, figname=None):
     https://arxiv.org/pdf/1610.07273.pdf
     https://pyts.readthedocs.io/en/stable/auto_examples/image/plot_gaf.html#sphx-glr-auto-examples-image-plot-gaf-py
     """
+    import pyts.image as pytsimg
+    import pyts.multivariate.image as pytsmvimg
+
     size = np.ceil(np.sqrt(X.shape[1])).astype(int)
     row_off = size-np.ceil(X.shape[1]/size).astype(int)
     # Recurrence plot
