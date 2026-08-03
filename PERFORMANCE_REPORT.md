@@ -93,7 +93,9 @@ dict flagged in the report is now a `detach().clone()` (1.8–3.4x faster, small
   to 8 decimals and the same final weight checksum on this branch and at `32699d1`.
 - Test suite: **339 passed, 4 failed**. The 4 failures are device-placement tests that fail
   identically at the base commit (verified in a clean worktree) — unrelated to this work.
-  23 new tests were added covering the rewrite.
+  23 new tests were added covering the rewrite. `tests/psl` is excluded from that count: it is
+  a very slow hypothesis-driven emulator suite, and nothing under `src/neuromancer/psl` imports
+  any of the five modules touched here.
 
 ## What I tried and rejected (with numbers)
 
