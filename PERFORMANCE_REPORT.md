@@ -72,9 +72,27 @@ mutate the caller's dict" contract for one copy instead of N.
 **3. Constraint graphs are resolved once, not per evaluation** (`constraint.py`).
 `Variable.get_value` called networkx `in_edges()` for every node of every constraint on every
 forward pass. The expression graph is fixed once built, so arguments are resolved in
-`make_graph`. Honest sizing: this is ~7% of constraint evaluation, which is itself ~3% of a
-train step. It grows with constraint count (measured at 2, 8 and 32 constraints), and it is
-free, so it stays — but it is not where the time was.
+`make_graph`.
+
+**Correction on the value of changes 2 and 3.** The commit message for `04705f5` credits these
+with taking a train step from 11.39ms to 10.74ms. That was a single-shot before/after across
+two process invocations, and it does not survive a proper measurement. Reverting each change
+individually on the current code, round-robin, taking the min of 9 rounds:
+
+| config                    | train step | cost of reverting |
+|---------------------------|-----------:|------------------:|
+| branch as committed       |   10.79ms  |                 — |
+| revert rollout rewrite    |   15.72ms  |          +4.93ms  |
+| revert changes 2 and 3    |   10.80ms  |          +0.01ms  |
+| revert everything         |   15.71ms  |          +4.93ms  |
+
+**Changes 2 and 3 are not measurable on this problem** — the whole train-step gain is change 1.
+Change 3 is real but small where it lives: it is ~5% of constraint evaluation (and grows with
+constraint count — measured at 2, 8 and 32 constraints), but constraint evaluation is only
+~1.7% of a train step, so it vanishes into the noise. Change 2 saves a handful of dict copies
+of an 8-key dict, i.e. sub-microsecond here; it would matter for a `Problem` with many nodes or
+a data dict with many keys. Both are kept because they are strictly less work with identical
+output, not because they showed up in a benchmark.
 
 **4. `Trainer` no longer pins one autograd graph per epoch** (`trainer.py`). This one was not
 in the bottleneck report and is a bug, not a slowdown: `loss_history` and `best_devloss` stored
@@ -91,6 +109,9 @@ dict flagged in the report is now a `detach().clone()` (1.8–3.4x faster, small
 - **Bit-identical gradients** (parameter grads after backward).
 - **Bit-identical training**: a 5-epoch DPC run produces the same train and dev loss history
   to 8 decimals and the same final weight checksum on this branch and at `32699d1`.
+- **`Problem.forward` output unchanged** under the dict-copy change: same 34 returned keys,
+  every returned tensor bit-identical, and neither implementation leaks a key into the
+  caller's dict (verified by evaluating one `Problem` object under both implementations).
 - Test suite: **339 passed, 4 failed**. The 4 failures are device-placement tests that fail
   identically at the base commit (verified in a clean worktree) — unrelated to this work.
   23 new tests were added covering the rewrite. `tests/psl` is excluded from that count: it is

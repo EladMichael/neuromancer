@@ -176,7 +176,7 @@ def bench_training(results, batch=100, nsteps=100, n_samples=200, epochs=5):
                           epochs=epochs, patience=epochs, warmup=epochs, epoch_verbose=epochs + 1)
         trainer.train()
 
-    results[f'training_{epochs}epochs'] = timeit(run, repeats=1, warmup=0)
+    results[f'training_{epochs}epochs'] = timeit(run, repeats=3)
 
 
 BENCHMARKS = {
