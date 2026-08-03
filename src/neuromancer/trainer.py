@@ -290,7 +290,8 @@ class Trainer:
                             or (not self._eval_min and output[self.eval_metric] > self.best_devloss):
                         self.best_model = clone_state_dict(self.model)
                         # detached, otherwise every epoch's autograd graph is kept alive
-                        self.best_devloss = output[self.eval_metric].detach()
+                        best = output[self.eval_metric]
+                        self.best_devloss = best.detach() if isinstance(best, torch.Tensor) else best
                         self.badcount = 0
                     else:
                         if i > self.warmup:
