@@ -2,8 +2,6 @@
 
 
 """
-from copy import deepcopy
-
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import numpy as np
@@ -21,6 +19,18 @@ from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 
 def move_batch_to_device(batch, device="cpu"):
     return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+
+
+def clone_state_dict(model):
+    """
+    Snapshot of a model's weights, detached from the graph they were produced in.
+
+    Cheaper than deepcopy, which pickles its way through the whole state dict.
+
+    :param model: (nn.Module) model to snapshot
+    :return: (dict {str: Tensor}) independent copy of the model's state dict
+    """
+    return {k: v.detach().clone() for k, v in model.state_dict().items()}
 
 
 class CustomEarlyStopping(EarlyStopping):
@@ -220,7 +230,7 @@ class Trainer:
         self.badcount = 0
         self.clip = clip
         self.best_devloss = np.finfo(np.float32).max if self._eval_min else 0.
-        self.best_model = deepcopy(self.model.state_dict())
+        self.best_model = clone_state_dict(self.model)
         self.multi_fidelity=multi_fidelity
         self.device = device
         self.loss_history = dict()
@@ -271,15 +281,16 @@ class Trainer:
                             eval_output = self.model(d_batch)
                             losses.append(eval_output[self.dev_metric])
                         mean_dev_loss = torch.mean(torch.stack(losses))
-                        self.loss_history["dev"].append(mean_dev_loss)
+                        self.loss_history["dev"].append(mean_dev_loss.detach())
                         eval_output[f"mean_{self.dev_metric}"] = mean_dev_loss
                         output = {**output, **eval_output}
                     self.callback.begin_eval(self, output)  # Used for alternate dev evaluation
 
                     if (self._eval_min and output[self.eval_metric] < self.best_devloss)\
                             or (not self._eval_min and output[self.eval_metric] > self.best_devloss):
-                        self.best_model = deepcopy(self.model.state_dict())
-                        self.best_devloss = output[self.eval_metric]
+                        self.best_model = clone_state_dict(self.model)
+                        # detached, otherwise every epoch's autograd graph is kept alive
+                        self.best_devloss = output[self.eval_metric].detach()
                         self.badcount = 0
                     else:
                         if i > self.warmup:
@@ -288,7 +299,8 @@ class Trainer:
                         self.logger.log_metrics(output, step=i)
                     else:
                         mean_loss = output[f'mean_{self.train_metric}']
-                        self.loss_history["train"].append(mean_loss)
+                        # detached, otherwise every epoch's autograd graph is kept alive
+                        self.loss_history["train"].append(mean_loss.detach())
                         if i % (self.epoch_verbose) == 0:
                             print(f'epoch: {i}  {self.train_metric}: {mean_loss}')
 

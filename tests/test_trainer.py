@@ -424,3 +424,42 @@ def test_early_stopping(get_problem, get_data):
     assert base_trainer.current_epoch == 5 
     assert lit_trainer.current_epoch == 5
 """
+
+
+def test_loss_history_does_not_retain_the_autograd_graph(get_problem, get_data):
+    """
+    The per-epoch loss history is kept for the whole run, so it must hold plain values.
+    Holding graph-connected tensors pins one autograd graph per epoch in memory.
+    """
+    train_data, dev_data, _, batch_size = get_data()
+    loaders = [torch.utils.data.DataLoader(d, batch_size=batch_size, num_workers=0,
+                                           collate_fn=d.collate_fn, shuffle=False)
+               for d in [train_data, dev_data]]
+    trainer = Trainer(get_problem, *loaders, epochs=3, patience=10, warmup=10,
+                      epoch_verbose=100)
+    trainer.train()
+
+    assert len(trainer.loss_history["train"]) == 3
+    for split in ["train", "dev"]:
+        for loss in trainer.loss_history[split]:
+            assert loss.grad_fn is None
+    assert trainer.best_devloss.grad_fn is None
+
+
+def test_best_model_snapshot_is_independent_of_later_updates(get_problem, get_data):
+    """The saved best weights must not move when training continues."""
+    train_data, dev_data, _, batch_size = get_data()
+    loaders = [torch.utils.data.DataLoader(d, batch_size=batch_size, num_workers=0,
+                                           collate_fn=d.collate_fn, shuffle=False)
+               for d in [train_data, dev_data]]
+    trainer = Trainer(get_problem, *loaders, epochs=2, patience=10, warmup=10,
+                      epoch_verbose=100)
+    trainer.train()
+    snapshot = {k: v.clone() for k, v in trainer.best_model.items()}
+
+    for param in trainer.model.parameters():
+        with torch.no_grad():
+            param.add_(1.0)
+
+    for key, value in snapshot.items():
+        assert torch.equal(trainer.best_model[key], value)
