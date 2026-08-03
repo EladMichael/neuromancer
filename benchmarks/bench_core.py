@@ -97,7 +97,7 @@ def build_dpc_problem(nsteps):
     objectives = [0.01 * (u == 0.0), 0.1 * (u[:, :-1, :] - u[:, 1:, :] == 0.0)]
     constraints = [50.0 * (y > ymin), 50.0 * (y < ymax)]
     for term, name in zip(objectives + constraints, ['action', 'du', 'y_min', 'y_max']):
-        term.update_name(name) if hasattr(term, 'update_name') else setattr(term, 'name', name)
+        term.update_name(name)
     return Problem([cl_system], PenaltyLoss(objectives, constraints))
 
 
