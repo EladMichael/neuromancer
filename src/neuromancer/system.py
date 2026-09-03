@@ -290,11 +290,11 @@ class System(nn.Module):
         :return: (dict: {str: Tensor}) data with outputs of nstep rollout of Node interactions
         """
         data = input_dict.copy()
-        nsteps = self.nsteps if self.nsteps is not None else data[self.nstep_key].shape[1] # Infer number of rollout steps
+        nsteps = self.nsteps if self.nsteps is not None else data[self.nstep_key].shape[1]  # Infer number of rollout steps
         data = self.init(data)  # Set initial conditions of the system
         for i in range(nsteps):
             for node in self.nodes:
-                indata = {k: data[k][:, i] for k in node.input_keys} # collect what the compute node needs from data nodes
+                indata = {k: data[k][:, i] for k in node.input_keys}  # collect what the compute node needs from data nodes
                 outdata = node(indata)  # compute
                 data = self.cat(data, outdata)  # feed the data nodes
         return data  # return recorded system measurements
