@@ -67,50 +67,34 @@ if __name__ == "__main__":
 
     # torch dataloaders
     batch_size = 200
-    train_loader = torch.utils.data.DataLoader(
-        train_data, batch_size=batch_size,
-        collate_fn=train_data.collate_fn, shuffle=False
-    )
-    dev_loader = torch.utils.data.DataLoader(
-        dev_data, batch_size=batch_size,
-        collate_fn=dev_data.collate_fn, shuffle=False
-    )
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size,
+                                               collate_fn=train_data.collate_fn,
+                                               shuffle=False)
+    dev_loader = torch.utils.data.DataLoader(dev_data, batch_size=batch_size,
+                                             collate_fn=dev_data.collate_fn,
+                                             shuffle=False)
 
     """
     # # #  System model and Control policy in Neuromancer
     """
     # white-box ODE model with no-plant model mismatch
     two_tank_ode = ode.TwoTankParam()
-
-    two_tank_ode.c1 = nn.Parameter(
-        torch.tensor(gt_model.c1), 
-        requires_grad=False
-    )
-
-    two_tank_ode.c2 = nn.Parameter(
-        torch.tensor(gt_model.c2), 
-        requires_grad=False
-    )
+    two_tank_ode.c1 = nn.Parameter(torch.tensor(gt_model.c1), requires_grad=False)
+    two_tank_ode.c2 = nn.Parameter(torch.tensor(gt_model.c2), requires_grad=False)
 
     # integrate continuous time ODE
-    # using 4th order runge kutta integrator
-    integrator = integrators.RK4(two_tank_ode, h=torch.tensor(ts))
-
+    integrator = integrators.RK4(two_tank_ode, h=torch.tensor(ts))  # using 4th order runge kutta integrator
     # symbolic system model
     model = Node(integrator, ['x', 'u'], ['x'], name='model')
 
     # neural net control policy
-    net = blocks.MLP_bounds(
-        insize=nx + nref, outsize=nu, hsizes=[32, 32],
-        nonlin=activations['gelu'], min=umin, max=umax,
-    )
+    net = blocks.MLP_bounds(insize=nx + nref, outsize=nu, hsizes=[32, 32],
+                        nonlin=activations['gelu'], min=umin, max=umax)
     policy = Node(net, ['x', 'r'], ['u'], name='policy')
 
     # neural net control policy with reference preview
-    net_preview = blocks.MLP_bounds(
-        insize=nx + nref*(preview_horizon+1), outsize=nu, hsizes=[64, 32],
-        nonlin=activations['gelu'], min=umin, max=umax,
-    )
+    net_preview = blocks.MLP_bounds(insize=nx + (nref*(preview_horizon+1)), outsize=nu, hsizes=[64, 32],
+                        nonlin=activations['gelu'], min=umin, max=umax)
     policy_with_preview = Node(
         net_preview, ['x', 'r'], ['u'], name='policy',
         input_map={
